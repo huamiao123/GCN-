@@ -1,0 +1,22 @@
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Native build outputs
+build/
+*.so
+*.o
+*.a
+
+# Experiment outputs and local data
+runs/
+results/
+datasets/
+*.log
+*.csv
+
+# Local archives
+*.tgz
+*.tar.gz
+*.zip

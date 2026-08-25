@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# ogbn-arxiv 32-thread / 200-epoch comparison for the shape-driven optimized
+# profile. Array 0 is TFS v2_3_auto; array 1 is native stock DGL.
+#SBATCH -p intel_expr
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -c 32
+#SBATCH --mem=64G
+#SBATCH --exclusive
+#SBATCH --sockets-per-node=1
+#SBATCH --cores-per-socket=32
+#SBATCH --threads-per-core=1
+#SBATCH -t 01:00:00
+#SBATCH --array=0-1%1
+#SBATCH -J arxiv_v23_auto_200e
+#SBATCH -o /home/huangjianqiang_group/hdacp1/data/wzh/final_v2_2/slurm/arxiv_v23_auto_200e_%A_%a.out
+#SBATCH -e /home/huangjianqiang_group/hdacp1/data/wzh/final_v2_2/slurm/arxiv_v23_auto_200e_%A_%a.err
+
+set -euo pipefail
+
+ROOT=${TFS_ROOT:-/home/huangjianqiang_group/hdacp1/data/wzh/final_v2_2}
+THREADS=${TFS_THREADS:-32}
+RUN_ROOT=${ARXIV_AUTO_RUN_ROOT:-$ROOT/runs/arxiv_v2_3_dataflow_t${THREADS}_200e_20260818}
+DATASET=${ARXIV_ROOT:-/home/huangjianqiang_group/hdacp1/data/wzh/TFS-Train/runs/c5_fullstep_arxiv_20260804_v3/dataset/arxiv}
+point=${SLURM_ARRAY_TASK_ID:-0}
+
+case "$point" in
+  0) method=hybrid; tag=tfs_v2_3_auto ;;
+  1) method=dgl_stock; tag=dgl_native_stock ;;
+  *) echo "invalid array point: $point" >&2; exit 2 ;;
+esac
+
+run="$RUN_ROOT/$tag"
+test_py="$ROOT/tests/hybrid_fullstep_arxiv_detailed.py"
+mkdir -p "$run"
+test ! -e "$run/status.json" || { echo "run already exists: $run" >&2; exit 90; }
+exec > >(tee "$run/stdout.log") 2> >(tee "$run/stderr.log" >&2)
+trap 'code=$?; printf "{\"status\":\"failed\",\"exit_code\":%d}\n" "$code" > "$run/status.json"; exit "$code"' ERR
+
+module load intel/intel-oneapi-compilers/2024.1.0/gcc8.5.0-5ndeojp
+
+export ARXIV_ROOT="$DATASET"
+export HYBRID_INPUT_DIM=128 HYBRID_HIDDEN_DIM=128 HYBRID_OUT_DIM=40
+export HYBRID_LAYERS=2 HYBRID_SEED=101 HYBRID_TRAIN_EPOCHS=200
+export HYBRID_WARMUPS=0 HYBRID_REPEATS=0 HYBRID_LAYER_PROFILE=0
+export HYBRID_DETAILED_PROFILE=1 HYBRID_DGL_OP_PROFILE=0 HYBRID_DTYPE=fp32
+export HYBRID_GRAD_TOL=0.03 HYBRID_FORWARD_TOL=0.03
+export OMP_NUM_THREADS="$THREADS" MKL_NUM_THREADS="$THREADS" OMP_DYNAMIC=FALSE MKL_DYNAMIC=FALSE
+export OMP_PROC_BIND=close OMP_PLACES=cores
+export LD_LIBRARY_PATH="/home/huangjianqiang_group/hdacp1/.local/lib/python3.9/site-packages/torch/lib:${LD_LIBRARY_PATH:-}"
+
+if [[ "$method" == hybrid ]]; then
+  export TFS_RELEASE_PROFILE=v2_3_dataflow
+  source "$ROOT/scripts/tfs_standard_env.sh"
+  export TFS_RUNTIME_CONTRACT_DIR="$run"
+  export TFS_MEMORY_POLICY=localalloc TFS_CPU_NODES=0-3 TFS_MEMORY_NODES=0-3
+  export TFS_HS_CACHE_MAX_BYTES=1000000000
+  export TFS_AMX_PERMISSION_CACHE=1
+  export HYBRID_PATH=hybrid HYBRID_AMX_FORWARD=1 HYBRID_AMX_BACKWARD=1
+  export HYBRID_PERSISTENT_HS_CACHE=1
+  export PYTHONPATH="$ROOT/build/extension:$ROOT/python:$ROOT/csrc"
+else
+  export HYBRID_PATH=dgl_stock HYBRID_DGL_VARIANT=stock
+  export HYBRID_AMX_FORWARD=0 HYBRID_AMX_BACKWARD=0
+  export PYTHONPATH="$ROOT/python"
+  unset HYBRID_PERSISTENT_HS_CACHE HYBRID_STATIC_AGG_CACHE
+  unset TFS_RELEASE_PROFILE TFS_RELEASE_CONTRACT_STRICT TFS_RUNTIME_CONTRACT
+  unset TFS_EXEC_PLANNER TFS_STATIC_HS TFS_STATIC_AGGREGATE TFS_AGGREGATE_SAVED
+  unset TFS_SMALL_SINGLE_SCAN TFS_ACTIVE_ROW TFS_NUMA_PRIVATE TFS_NUMA_REDUCE
+  unset TFS_NUMA_FIRST_TOUCH TFS_PULL_ONLY_BACKWARD TFS_SCALE_GRAD_BF16_NATIVE
+  unset TFS_HIGHD_RELEASE_MODE TFS_HIGHD_STREAM_V1 TFS_HIGHD_NATIVE_STREAM
+  unset TFS_TRANSFORM_HIGHD_STREAM_V1 TFS_TRANSFORM_HIGHD_NATIVE TFS_HIGHD_BWD_BUDGET_BYTES
+  unset TFS_TRANSFORM_HIGHD_SINGLE_SCAN TFS_AGGREGATE_DSLAB_SINGLE_SCAN
+  unset TFS_HIGHD_BWD_D_TILE TFS_HIGHD_BWD_ROW_PANEL TFS_TRANSFORM_HIGHD_D_TILE
+  unset TFS_HIGHD_NATIVE_PANEL TFS_WORKSPACE_CACHE_MAX_BYTES
+  unset TFS_HIGHD_PANEL_BUDGET_BYTES TFS_HIGHD_FUSED_DB TFS_HIGHD_FUSED_TRANSPOSE
+  unset TFS_HIGHD_FUSED_SCALE_TRANSPOSE TFS_HIGHD_CONTIGUOUS_PANELS TFS_COLIDX
+  unset TFS_GLUE_E1_FUSED_DB TFS_GLUE_E2_VEC_STORE TFS_GLUE_E3_EMPTY_DX
+  unset TFS_GLUE_E4_FUSED_EPILOGUE TFS_GLUE_E5_VEC_HS TFS_GLUE_E6_LOCAL_ZERO
+  unset TFS_GLUE_E6_PARALLEL_REDUCE TFS_GLUE_E6_SERIAL_WT TFS_GLUE_E7_FORWARD_SCHEDULE
+  unset TFS_GLUE_E8_RIGHTSIZE_POOL TFS_GLUE_E8_ATOMIC_DONE TFS_GLUE_E8_SPIN
+  unset TFS_GLUE_E9_INT32_COLIDX TFS_GLUE_E11_VEC_GRAD_DB TFS_FWD_V2_SINGLE_SCAN
+  unset TFS_GLUE_E12_D47_SINGLE_SCAN TFS_GLUE_E13_ACTIVE_ROW TFS_GLUE_E14_ACTIVE_ROW_WIDE TFS_E13_ACTIVE_MAX_DENSITY
+  unset TFS_MEMORY_POLICY TFS_CPU_NODES TFS_MEMORY_NODES TFS_HS_CACHE_MAX_BYTES
+  unset TFS_PROFILE_NUMA_WORKSPACE TFS_INTERNAL_PROFILE TFS_HIGHD_NATIVE_SCALE
+  unset TFS_HIGHD_STREAM_AUTO HYBRID_STATIC_AGG_CACHE
+fi
+
+export HYBRID_OUTPUT="$run/training_detailed.csv"
+export HYBRID_OP_PROFILE="$run/dgl_ops.jsonl"
+hostname > "$run/hostname.txt"
+lscpu > "$run/lscpu.txt"
+numactl -H > "$run/numa.txt"
+env | sort > "$run/environment_start.txt"
+sha256sum "$test_py" "$ROOT/python/tfs_train/execution_plan.py" "$ROOT/scripts/tfs_standard_env.sh" 2>/dev/null > "$run/source_input_sha256.tsv" || true
+
+start_ns=$(date +%s%N)
+set +e
+numactl --cpunodebind=0-3 --localalloc python -u "$test_py"
+code=$?
+set -e
+end_ns=$(date +%s%N)
+wall_ms=$(( (end_ns - start_ns) / 1000000 ))
+printf '%s\n' "{\"status\":\"$([[ $code -eq 0 ]] && echo success || echo failed)\",\"profile\":\"${TFS_RELEASE_PROFILE:-native_dgl_stock}\",\"method\":\"$method\",\"threads\":$THREADS,\"epochs\":200,\"wall_ms\":$wall_ms,\"exit_code\":$code}" > "$run/status.json"
+test "$code" -eq 0
