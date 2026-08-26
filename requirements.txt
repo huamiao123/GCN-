@@ -1,0 +1,12 @@
+# Reproducible Python runtime for the authority TFS/DGL CPU experiments.
+# Install the CPU PyTorch wheel first, then this file:
+#   python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+torch==2.5.1+cpu
+dgl==2.1.0
+numpy==2.0.2
+pytest==8.3.4
+torchdata==0.8.0
+
+# Optional: only the historical PyG-based benchmark harnesses import this.
+# It is not required by the formal TFS-vs-stock-DGL authority launcher.
+torch-geometric
