@@ -1,0 +1,3 @@
+# Slurm and Linux shells reject CRLF batch scripts. Keep executable shell
+# sources canonical in the repository regardless of the contributor OS.
+*.sh text eol=lf
