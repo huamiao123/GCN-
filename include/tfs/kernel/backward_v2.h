@@ -86,6 +86,14 @@ void dh_amx_4c2a2b(const bf16* ybar, int rows_padded, int valid_rows,
                    float* dh, int global_row0, const float* target_scale,
                    bool double_buffer, KernelCounters* counters);
 
+// BF16-output sibling used by the High-D Q-first path.  The AMX accumulator
+// is rounded once at the dense-to-sparse boundary, avoiding an N×K FP32
+// materialization that would immediately be converted to BF16 by CSR pull.
+void dh_amx_4c2a2b_bf16(const bf16* ybar, int rows_padded, int valid_rows,
+                        int d_padded, const bf16* packed_wt, int logical_k,
+                        int k_padded, bf16* dh, int global_row0,
+                        bool double_buffer, KernelCounters* counters);
+
 // Accumulates one row panel directly into a thread-private dW^T[D,K].
 // C tiles are loaded from and stored to local_dwt once per output panel.
 void dw_amx_4c2a2b(const bf16* ybar_t, int d_padded, int rows_padded,

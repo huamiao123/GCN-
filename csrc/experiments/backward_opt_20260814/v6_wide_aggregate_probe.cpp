@@ -506,9 +506,16 @@ template <class Index>
 void pull_panel_impl(const std::int64_t* rp, const Index* ci,
                 const bf16* src, int logical_d, int stride,
                 int row0, int valid, bf16* out, int out_stride,
-                bool vector_bf16_store, bool single_scan_special,
-                const std::uint8_t* active_rows, bool single_scan_wide) {
+bool vector_bf16_store, bool single_scan_special,
+  const std::uint8_t* active_rows, bool single_scan_wide) {
   if (logical_d == 128 && stride == 128) {
+    // Four CSR edges ahead is far enough to overlap the random source-row
+    // miss with the current eight-vector accumulation, while remaining an
+    // opt-in A/B gate.  Prefetch all four 64-B cache lines of a 128-wide
+    // BF16 source row; prefetching only its first line would not help this
+    // kernel's full-row load sequence.
+    const bool sparse_prefetch = experiment_flag("TFS_SPARSE_PREFETCH");
+    constexpr std::int64_t prefetch_distance = 4;
     for (int local = 0; local < valid; ++local) {
       const int row = row0 + local;
       bf16* d=out+static_cast<std::size_t>(local)*out_stride;
@@ -526,6 +533,16 @@ void pull_panel_impl(const std::int64_t* rp, const Index* ci,
         a6=_mm512_setzero_ps();a7=_mm512_setzero_ps();
       }
       for (std::int64_t e=rp[row]; e<rp[row+1]; ++e) {
+        if (sparse_prefetch && e + prefetch_distance < rp[row + 1]) {
+          const int future_source =
+              static_cast<int>(ci[e + prefetch_distance]);
+          const char* future = reinterpret_cast<const char*>(
+              src + static_cast<std::size_t>(future_source) * stride);
+          _mm_prefetch(future, _MM_HINT_T0);
+          _mm_prefetch(future + 64, _MM_HINT_T0);
+          _mm_prefetch(future + 128, _MM_HINT_T0);
+          _mm_prefetch(future + 192, _MM_HINT_T0);
+        }
         const int source=static_cast<int>(ci[e]);
         if (active_rows != nullptr && active_rows[source] == 0) continue;
         const bf16* p=src+static_cast<std::size_t>(source)*stride;
@@ -2269,6 +2286,46 @@ at::Tensor c3_pull_only_bf16_amx_v1(
   return pulled;
 }
 
+// High-D Q-first consumes a BF16 Q tensor in the sparse pull, but dH remains
+// FP32.  Convert the BF16 pull result and apply the destination-side degree
+// scale in this one output epilogue.  Applying that scale before A^T would be
+// algebraically wrong because diag(scale) does not commute with A^T.
+at::Tensor c3_pull_only_bf16_scaled_fp32_amx_v1(
+    const at::Tensor& x_in, const at::Tensor& rowptr_in,
+    const at::Tensor& colidx_in, const at::Tensor& output_scale_in,
+    int64_t threads64) {
+  auto pulled = c3_pull_only_bf16_amx_v1(
+      x_in, rowptr_in, colidx_in, threads64);
+  auto output_scale = output_scale_in.contiguous();
+  TORCH_CHECK(output_scale.device().is_cpu() &&
+              output_scale.scalar_type() == at::kFloat &&
+              output_scale.dim() == 1 &&
+              output_scale.numel() == pulled.size(0),
+              "BF16 pull-only output scale must be CPU FP32 [N]");
+  const int n = static_cast<int>(pulled.size(0));
+  const int k = static_cast<int>(pulled.size(1));
+  const int threads = static_cast<int>(threads64);
+  const bf16* src = reinterpret_cast<const bf16*>(
+      pulled.data_ptr<at::BFloat16>());
+  const float* scale = output_scale.data_ptr<float>();
+  auto out = at::empty({n, k},
+                       pulled.options().dtype(at::kFloat));
+  float* dst = out.data_ptr<float>();
+  parallel_range(n, threads, [&](std::int64_t begin, std::int64_t end) {
+    for (std::int64_t row = begin; row < end; ++row) {
+      const bf16* sr = src + static_cast<std::size_t>(row) * k;
+      float* dr = dst + static_cast<std::size_t>(row) * k;
+      const __m512 sv = _mm512_set1_ps(scale[row]);
+      int q = 0;
+      for (; q + 16 <= k; q += 16)
+        _mm512_storeu_ps(dr + q,
+                         _mm512_mul_ps(load_bf16x16_fp32(sr + q), sv));
+      for (; q < k; ++q) dr[q] = from_bf16(sr[q]) * scale[row];
+    }
+  });
+  return out;
+}
+
 // Fused row scaling and FP32->BF16 conversion for the wide backward.  The
 // framework expression (grad * scale.unsqueeze(1)).to(BF16) materializes a
 // full FP32 temporary before writing the BF16 gradient.  This kernel performs
@@ -3605,9 +3662,9 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
               weight.size(1) == d && rowptr.numel() == n + 1 &&
               scale.numel() == n,
               "aggregate high-D backward shape unsupported");
-  // AMX row kernels require complete 32-row tiles.  The logical K tail is
-  // supported, but the pull-only primitive can consume a padded temporary
-  // only after it is compacted, so retain the logical K tensor for now.
+  // AMX row kernels require complete 32-row tiles.  Q is stored in BF16 at
+  // the dense-to-sparse boundary: the CSR pull consumes BF16 directly, while
+  // its FP32 output epilogue applies the destination-side normalization.
   const int dp = round_up(d, 32);
   const int kp = round_up(k, 64);
   const int np = round_up(n, 32);
@@ -3663,10 +3720,11 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
   // showed up as a ~100 ms fixed cost in the native high-D backward.
   auto db = at::empty({d}, grad.options());
   at::Tensor d_padded;
-  // dh_amx_4c2a2b stores complete 32-row AMX tiles.  Allocate the row tail
-  // explicitly and narrow it back before the CSR pull; otherwise an N that is
-  // not a multiple of 32 writes past the logical dX tensor.
-  if (compute_dx) d_padded = at::empty({np, kp}, grad.options());
+  // The BF16 AMX epilogue stores complete 32-row tiles.  Allocate the row
+  // tail explicitly and narrow it back before CSR pull; otherwise an N that
+  // is not a multiple of 32 writes past the logical dX tensor.
+  if (compute_dx)
+    d_padded = at::empty({np, kp}, grad.options().dtype(at::kBFloat16));
   const double profile_alloc1 = now_ms();
   const float* gp = grad.data_ptr<float>();
   const float* sp = scale.data_ptr<float>();
@@ -3680,12 +3738,12 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
   // than four panels per worker retain the cyclic schedule to avoid idle
   // workers.  Both decisions remain explicitly overridable for ablations.
   const bool large_panel_work = panel_count >= threads * 4;
-  // The fused db update adds a read/modify/write of the per-thread D-vector
-  // to every scale row.  That is useful for narrow outputs, but for wide
-  // outputs the vectorized standalone grad.sum(0) is cheaper despite the
-  // second pass.  Keep the default dimension-driven and retain the env knob
-  // for explicit ablations (or future hardware-specific tuning).
-  const bool fused_db = highd_adaptive_flag("TFS_HIGHD_FUSED_DB", d <= 512);
+  // Bias reduction shares the panel's already-hot gradient values.  The
+  // implementation below accumulates a 32-row × 32-D tile in registers and
+  // updates the thread-local vector once per tile, so the wide-output path
+  // avoids both grad.sum(0)'s second N×D pass and the old row-level RMW.
+  // Keep the environment switch as an explicit ablation gate.
+  const bool fused_db = highd_adaptive_flag("TFS_HIGHD_FUSED_DB", true);
   const bool fused_transpose = highd_adaptive_flag(
       "TFS_HIGHD_FUSED_TRANSPOSE", large_panel_work);
   const bool fused_scale_transpose = fused_transpose && highd_adaptive_flag(
@@ -3720,32 +3778,49 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
       const int valid = std::min(panel, n - row0);
       const int rows = round_up(valid, 32);
       auto scale_rows = [&](int begin_row, int end_row) {
-        for (int row = begin_row; row < end_row; ++row) {
-          const float* gr = gp + static_cast<std::size_t>(row0 + row) * d;
-          bf16* yr = z.y.data() + static_cast<std::size_t>(row) * dp;
-          const __m512 sv = _mm512_set1_ps(sp[row0 + row]);
-          int q = 0;
-          for (; q + 32 <= d; q += 32) {
-            const __m512 g0 = _mm512_loadu_ps(gr + q);
-            const __m512 g1 = _mm512_loadu_ps(gr + q + 16);
-            if (fused_db) {
-              const __m512 b0 = _mm512_add_ps(
-                  _mm512_loadu_ps(dbp + q), g0);
-              const __m512 b1 = _mm512_add_ps(
-                  _mm512_loadu_ps(dbp + q + 16), g1);
-              _mm512_storeu_ps(dbp + q, b0);
-              _mm512_storeu_ps(dbp + q + 16, b1);
+        constexpr int db_tile_rows = 32;
+        const int vector_end = d / 32 * 32;
+        for (int tile0 = begin_row; tile0 < end_row;
+             tile0 += db_tile_rows) {
+          const int tile1 = std::min(end_row, tile0 + db_tile_rows);
+          for (int q = 0; q < vector_end; q += 32) {
+            __m512 sum0 = _mm512_setzero_ps();
+            __m512 sum1 = _mm512_setzero_ps();
+            for (int row = tile0; row < tile1; ++row) {
+              const float* gr = gp + static_cast<std::size_t>(row0 + row) * d;
+              bf16* yr = z.y.data() + static_cast<std::size_t>(row) * dp;
+              const __m512 g0 = _mm512_loadu_ps(gr + q);
+              const __m512 g1 = _mm512_loadu_ps(gr + q + 16);
+              if (fused_db) {
+                sum0 = _mm512_add_ps(sum0, g0);
+                sum1 = _mm512_add_ps(sum1, g1);
+              }
+              const __m512 sv = _mm512_set1_ps(sp[row0 + row]);
+              _mm512_storeu_si512(reinterpret_cast<void*>(yr + q),
+                  (__m512i)_mm512_cvtne2ps_pbh(_mm512_mul_ps(g1, sv),
+                                                _mm512_mul_ps(g0, sv)));
             }
-            const __m512 v0 = _mm512_mul_ps(g0, sv);
-            const __m512 v1 = _mm512_mul_ps(g1, sv);
-            _mm512_storeu_si512(reinterpret_cast<void*>(yr + q),
-                (__m512i)_mm512_cvtne2ps_pbh(v1, v0));
+            if (fused_db) {
+              _mm512_storeu_ps(dbp + q,
+                  _mm512_add_ps(_mm512_loadu_ps(dbp + q), sum0));
+              _mm512_storeu_ps(dbp + q + 16,
+                  _mm512_add_ps(_mm512_loadu_ps(dbp + q + 16), sum1));
+            }
           }
-          for (; q < d; ++q) {
-            if (fused_db) dbp[q] += gr[q];
-            yr[q] = to_bf16(gr[q] * sp[row0 + row]);
+          for (int q = vector_end; q < d; ++q) {
+            float sum = 0.0f;
+            for (int row = tile0; row < tile1; ++row) {
+              const float* gr = gp + static_cast<std::size_t>(row0 + row) * d;
+              bf16* yr = z.y.data() + static_cast<std::size_t>(row) * dp;
+              if (fused_db) sum += gr[q];
+              yr[q] = to_bf16(gr[q] * sp[row0 + row]);
+            }
+            if (fused_db) dbp[q] += sum;
           }
-          for (; q < dp; ++q) yr[q] = bf16(0);
+          for (int row = tile0; row < tile1; ++row) {
+            bf16* yr = z.y.data() + static_cast<std::size_t>(row) * dp;
+            for (int q = d; q < dp; ++q) yr[q] = bf16(0);
+          }
         }
       };
       const double scale_t0 = profile_native ? now_ms() : 0.0;
@@ -3789,10 +3864,10 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
 
       double stage_t0 = profile_native ? now_ms() : 0.0;
       if (compute_dx)
-        bv2::dh_amx_4c2a2b(z.y.data(), rows, valid, dp,
-                           ws.packed_wt.data(), k, kp,
-                           d_padded.data_ptr<float>(), row0, nullptr, true,
-                           nullptr);
+        bv2::dh_amx_4c2a2b_bf16(
+            z.y.data(), rows, valid, dp, ws.packed_wt.data(), k, kp,
+            reinterpret_cast<bf16*>(d_padded.data_ptr<at::BFloat16>()),
+            row0, true, nullptr);
       if (profile_native) native_dh_ms[tid] += now_ms() - stage_t0;
       if (!fused_transpose) {
         stage_t0 = profile_native ? now_ms() : 0.0;
@@ -3869,14 +3944,8 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
     at::Tensor pull_input = d_padded.narrow(0, 0, n);
     pull_input = use_k_tail
         ? pull_input.narrow(1, 0, k).contiguous() : pull_input;
-    auto d_h = c3_pull_only_amx_v1(pull_input, rowptr, colidx, threads);
-    // c3_pull_only_amx_v1 returns a newly allocated FP32 tensor.  Scale it
-    // in place instead of forming a second N x K tensor through the
-    // out-of-place broadcast multiply; this removes one full read/write of
-    // the high-D backward dX buffer and keeps the result mathematically
-    // identical to the previous expression.
-    d_h.mul_(scale.view({n, 1}));
-    dx = d_h;
+    dx = c3_pull_only_bf16_scaled_fp32_amx_v1(
+        pull_input, rowptr, colidx, scale, threads);
   } else {
     dx = at::empty({0}, grad.options());
   }

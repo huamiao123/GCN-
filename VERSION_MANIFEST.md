@@ -18,3 +18,19 @@ DGL construction path retained for future runs.  Deep NUMA ownership,
 replication, locality scheduling and partitioning remain outside this freeze;
 parallel first-touch plus external `localalloc` are baseline allocation
 hygiene, not claimed as the later NUMA algorithm.
+
+## 2026-08-26 TC-review candidate updates
+
+This branch now also carries isolated, source-level candidate updates from
+`tfs_tc_v3_fix_shadow_20260826`; it is no longer a byte-for-byte copy of the
+2026-08-19 timing authority. The changes are numerically gated but must pass
+separate performance A/B gates before replacing any reported authority result:
+
+- High-D Q-first keeps `Q` in BF16 at the dense-to-sparse boundary and applies
+  destination normalization in the FP32 pull epilogue.
+- High-D bias reduction uses tile-local accumulation to avoid a second full
+  `grad.sum(0)` scan; `TFS_HIGHD_FUSED_DB=0` remains the ablation arm.
+- Sparse source-row software prefetch is strictly opt-in via
+  `TFS_SPARSE_PREFETCH=1` and defaults off.
+- `scripts/run_p2_highd_smoke.sh` and `tests/test_highd_fused_db_ab.py` are
+  numerical gates only, never formal timing launchers.

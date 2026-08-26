@@ -362,6 +362,71 @@ void dh_amx_4c2a2b(const bf16* ybar, int rows_padded, int valid_rows,
   }
 }
 
+void dh_amx_4c2a2b_bf16(const bf16* ybar, int rows_padded, int valid_rows,
+                        int d_padded, const bf16* packed_wt, int logical_k,
+                        int k_padded, bf16* dh, int global_row0,
+                        bool double_buffer, KernelCounters* counters) {
+  const int output_blocks = k_padded / 16;
+  alignas(64) float tmp[4][256];
+  for (int row = 0; row < rows_padded; row += 16) {
+    for (int col = 0; col < k_padded; col += 64) {
+      const int active = std::min(4, std::max(0, (logical_k - col + 15) / 16));
+      if (active == 0) break;
+      if (active >= 1) _tile_zero(0);
+      if (active >= 2) _tile_zero(1);
+      if (active >= 3) _tile_zero(2);
+      if (active >= 4) _tile_zero(3);
+      bool a_alt = false;
+      load_a_tile(false, ybar + static_cast<std::size_t>(row) * d_padded,
+                  d_padded * static_cast<int>(sizeof(bf16)));
+      if (counters != nullptr) {
+        ++counters->a_tile_loads;
+        counters->y_bytes_read += 1024;
+      }
+      for (int reduction = 0; reduction < d_padded; reduction += 32) {
+        for (int q = 0; q < active; ++q) {
+          const bool b_alt = double_buffer && ((q & 1) != 0);
+          const bf16* b = packed_wt +
+              (static_cast<std::size_t>(reduction / 32) * output_blocks +
+               (col / 16) + q) * 512;
+          load_b_and_dp(q, b_alt, b, a_alt);
+          if (counters != nullptr) {
+            ++counters->b_tile_loads;
+            ++counters->dpbf16ps_calls;
+          }
+        }
+        if (reduction + 32 < d_padded) {
+          const bool next_alt = double_buffer ? !a_alt : false;
+          load_a_tile(next_alt,
+                      ybar + static_cast<std::size_t>(row) * d_padded +
+                          reduction + 32,
+                      d_padded * static_cast<int>(sizeof(bf16)));
+          a_alt = next_alt;
+          if (counters != nullptr) {
+            ++counters->a_tile_loads;
+            counters->y_bytes_read += 1024;
+          }
+        }
+      }
+      store_c_to_scratch(tmp, active);
+      for (int i = 0; i < 16 && row + i < valid_rows; ++i) {
+        bf16* dst = dh + static_cast<std::size_t>(global_row0 + row + i) *
+                             k_padded + col;
+        for (int q = 0; q < active; ++q) {
+          const __m512 value = _mm512_load_ps(tmp[q] + i * 16);
+          _mm256_storeu_si256(
+              reinterpret_cast<__m256i*>(dst + q * 16),
+              _mm512_cvtneps_pbh(value));
+        }
+      }
+      if (counters != nullptr) {
+        counters->c_tile_stores += active;
+        counters->accumulator_bytes += static_cast<std::uint64_t>(active) * 1024;
+      }
+    }
+  }
+}
+
 void dw_naive_baseline(const bf16* ybar_t, int d_padded, int rows_padded,
                        const std::vector<bf16>& packed_h, int k_padded,
                        float* local_dwt) {
