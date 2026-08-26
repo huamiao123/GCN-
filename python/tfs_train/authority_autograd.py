@@ -11,7 +11,7 @@ import os
 
 import torch
 
-from .native import backend
+from .native import backend, require_non_amx_c3
 
 
 class _C3Base(torch.autograd.Function):
@@ -24,9 +24,8 @@ class _C3Base(torch.autograd.Function):
                 grad_output.contiguous(), hs, weight, rowptr, colidx, scale,
                 ctx.threads, compute_dx)
         else:
-            dx, dw, db, _, _, _ = backend().c3_backward_selective(
-                grad_output.contiguous(), hs, weight, rowptr, colidx, scale,
-                ctx.schedule, ctx.threads, False, 8, compute_dx)
+            # No non-AMX C3 kernel exists in this release.
+            require_non_amx_c3("c3_backward_selective")
         if not compute_dx:
             dx = None
         # Benchmark wrappers may omit the optional replica cache argument.
@@ -64,8 +63,8 @@ class AggregateFirst(_C3Base):
                     x, cached_hs, weight, bias, rowptr, colidx, scale, threads,
                     False, cached_hs_replicas)
         else:
-            out, hs, _ = backend().c3_forward(
-                x, weight, bias, rowptr, colidx, scale, schedule, int(threads))
+            # No non-AMX C3 kernel exists in this release.
+            require_non_amx_c3("c3_forward")
         ctx.save_for_backward(hs if backward_hs is None else backward_hs,
                               weight, rowptr, colidx, scale)
         ctx.threads = int(threads)
@@ -91,8 +90,8 @@ class TransformFirst(_C3Base):
                     x, cached_hs, weight, bias, rowptr, colidx, scale, threads,
                     True, cached_hs_replicas)
         else:
-            out, hs, _ = backend().c3_forward_transform(
-                x, weight, bias, rowptr, colidx, scale, schedule, int(threads))
+            # No non-AMX C3 kernel exists in this release.
+            require_non_amx_c3("c3_forward_transform")
         ctx.save_for_backward(hs if backward_hs is None else backward_hs,
                               weight, rowptr, colidx, scale)
         ctx.threads = int(threads)

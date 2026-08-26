@@ -36,6 +36,9 @@ export HYBRID_PERSISTENT_HS_CACHE=1
 # One authority-wide cache ceiling.  Eligibility remains shape-derived in the
 # cache contract; individual dataset names must not choose resource policy.
 export TFS_HS_CACHE_MAX_BYTES=$((3 * 1024 * 1024 * 1024))
+# Source-level contract; needs neither the built extension nor AMX, so it
+# runs before anything that would import the module.
+python "$root/tests/test_extension_symbol_contract.py"
 python "$root/tests/smoke_final_pre_numa_planner.py"
 python -m pytest -q "$root/tests/test_execution_plan.py"
 python "$root/tests/smoke_standard_dgl_direct_csc.py" \

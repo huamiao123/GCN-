@@ -67,19 +67,26 @@ for n, k, d in tail_shapes:
     assert plan.d_slabs[-1][1] == d
     plan.validate()
 
-# The aggregate one-scan kernel is not implemented.  It must stay out of
-# auto and explicit requests must fail rather than run a mislabeled fallback.
+# There is no independent native one-CSR-scan aggregate kernel in this
+# release.  The variant exists only as an explicit d-slab reference stream
+# with one final CSR pull, so the contract it must satisfy is "never auto,
+# and never labelled as validated" -- not "explicit requests fail".  The same
+# contract is asserted from the other side by
+# tests/test_execution_plan.py::test_aggregate_dslab_single_scan_is_explicit_reference_only.
 auto_aggregate = build_layer_plan(
     4097, 1024, 1024, threads=32, compute_dx=True)
 assert auto_aggregate.execution_variant != "aggregate_highd_single_scan"
+assert auto_aggregate.selection_policy == "auto"
 with environment(TFS_AGGREGATE_DSLAB_SINGLE_SCAN="on",
                  TFS_HIGHD_NATIVE_STREAM="off"):
-    try:
-        build_layer_plan(4097, 1024, 1024, threads=32, compute_dx=True)
-    except ValueError as exc:
-        assert "not a one-CSR-scan kernel" in str(exc)
-    else:
-        raise AssertionError("unimplemented aggregate single-scan was selected")
+    explicit_aggregate = build_layer_plan(
+        4097, 1024, 1024, threads=32, compute_dx=True)
+assert explicit_aggregate.execution_variant == "aggregate_highd_single_scan"
+assert explicit_aggregate.selection_policy == "explicit"
+single_scan = next(c for c in explicit_aggregate.candidates
+                   if c.name == "aggregate_highd_single_scan")
+assert single_scan.performance_state == "experimental"
+assert not single_scan.validated_for_auto
 
 auto_transform = build_layer_plan(
     4097, 1024, 513, threads=32, compute_dx=True)

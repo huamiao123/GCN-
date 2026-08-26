@@ -35,7 +35,7 @@ except ImportError:
 from tfs_train.datasets import NodePropertyDataset
 from tfs_train.graph import CSRGraph, preprocess_undirected_fast
 from tfs_train.modules import TFSConvCSR
-from tfs_train.native import backend
+from tfs_train.native import backend, require_non_amx_c3
 from tfs_train.persistent_hs_cache import (
     PersistentAggregateCache,
     PersistentHsCache,
@@ -91,9 +91,8 @@ class _C3Base(torch.autograd.Function):
                 grad_output.contiguous(), hs, weight, rowptr, colidx, scale,
                 ctx.threads, compute_dx)
         else:
-            dx, dw, db, _, _, _ = backend().c3_backward_selective(
-                grad_output.contiguous(), hs, weight, rowptr, colidx, scale,
-                schedule, ctx.threads, False, 8, compute_dx)
+            # No non-AMX C3 kernel exists in this release.
+            require_non_amx_c3("c3_backward_selective")
         if not compute_dx:
             dx = None
         # forward() has eleven inputs.  cached_hs, backward_hs and the
@@ -130,8 +129,8 @@ class AggregateFirst(_C3Base):
                     x, cached_hs, weight, bias, rowptr, colidx, scale,
                     threads, False, cached_hs_replicas)
         else:
-            out, hs, _ = backend().c3_forward(
-                x, weight, bias, rowptr, colidx, scale, schedule, int(threads))
+            # No non-AMX C3 kernel exists in this release.
+            require_non_amx_c3("c3_forward")
         hs_saved = hs if backward_hs is None else backward_hs
         ctx.save_for_backward(hs_saved, weight, rowptr, colidx, scale, schedule)
         ctx.threads = int(threads)
@@ -152,8 +151,8 @@ class TransformFirst(_C3Base):
                     x, cached_hs, weight, bias, rowptr, colidx, scale,
                     threads, True, cached_hs_replicas)
         else:
-            out, hs, _ = backend().c3_forward_transform(
-                x, weight, bias, rowptr, colidx, scale, schedule, int(threads))
+            # No non-AMX C3 kernel exists in this release.
+            require_non_amx_c3("c3_forward_transform")
         hs_saved = hs if backward_hs is None else backward_hs
         ctx.save_for_backward(hs_saved, weight, rowptr, colidx, scale, schedule)
         ctx.threads = int(threads)

@@ -142,6 +142,12 @@ def test_formal_switches_and_plan_log(monkeypatch):
     monkeypatch.setenv("TFS_SMALL_SINGLE_SCAN", "off")
     monkeypatch.setenv("TFS_ACTIVE_ROW", "on")
     monkeypatch.setenv("TFS_COLIDX", "int64")
+    # ``TFS_MAX_LOCAL_DW_BYTES`` outranks the deprecated alias below, and the
+    # authority profile exports it as 0.  Drop it so this case actually
+    # exercises the alias instead of silently reading the profile's 0 --
+    # otherwise the test passes in a bare shell and fails inside
+    # scripts/run_final_pre_numa_gate.sh, which sources the profile first.
+    monkeypatch.delenv("TFS_MAX_LOCAL_DW_BYTES", raising=False)
     monkeypatch.setenv("TFS_LOCAL_DW_BUDGET_BYTES", "1048576")
     plan = build_layer_plan(4096, 100, 47)
     assert not plan.small_single_scan

@@ -26,7 +26,7 @@ from torch_geometric.nn import GCNConv
 
 from tfs_train import load_ogbn_arxiv_raw
 from tfs_train.modules import TFSConvCSR
-from tfs_train.native import backend
+from tfs_train.native import backend, require_non_amx_c3
 from tfs_train.execution_plan import emit_plan_logs, plan_layers
 from tfs_train.standard_runtime import configure_dgl
 from tfs_train.standard_dgl import DGLGCN
@@ -42,9 +42,8 @@ class _C3Base(torch.autograd.Function):
                 grad_output.contiguous(), hs, weight, rowptr, colidx, scale,
                 ctx.threads, compute_dx)
         else:
-            dx, dw, db, _, _, _ = backend().c3_backward_selective(
-                grad_output.contiguous(), hs, weight, rowptr, colidx, scale,
-                schedule, ctx.threads, False, 8, compute_dx)
+            # No non-AMX C3 kernel exists in this release.
+            require_non_amx_c3("c3_backward_selective")
         if not compute_dx:
             dx = None
         return dx, dw, db, None, None, None, None, None
@@ -57,8 +56,8 @@ class AggregateFirst(_C3Base):
             out, hs = backend().c3_forward_amx_v2(
                 x, weight, bias, rowptr, colidx, scale, int(threads), False)
         else:
-            out, hs, _ = backend().c3_forward(
-                x, weight, bias, rowptr, colidx, scale, schedule, int(threads))
+            # No non-AMX C3 kernel exists in this release.
+            require_non_amx_c3("c3_forward")
         ctx.save_for_backward(hs, weight, rowptr, colidx, scale, schedule)
         ctx.threads = int(threads)
         ctx.amx = os.environ.get("HYBRID_AMX_BACKWARD") == "1"
@@ -72,8 +71,8 @@ class TransformFirst(_C3Base):
             out, hs = backend().c3_forward_amx_v2(
                 x, weight, bias, rowptr, colidx, scale, int(threads), True)
         else:
-            out, hs, _ = backend().c3_forward_transform(
-                x, weight, bias, rowptr, colidx, scale, schedule, int(threads))
+            # No non-AMX C3 kernel exists in this release.
+            require_non_amx_c3("c3_forward_transform")
         ctx.save_for_backward(hs, weight, rowptr, colidx, scale, schedule)
         ctx.threads = int(threads)
         ctx.amx = os.environ.get("HYBRID_AMX_BACKWARD") == "1"
