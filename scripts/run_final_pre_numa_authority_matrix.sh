@@ -175,9 +175,16 @@ fi
 
 start_ns=$(date +%s%N)
 set +e
-/usr/bin/time -v -o "$run/resource_usage.txt" \
+if [[ "${AUTHORITY_RESOURCE_TIME:-1}" == "1" ]]; then
+  /usr/bin/time -v -o "$run/resource_usage.txt" \
+    numactl --cpunodebind=0-3 --localalloc python -u "$test_py" \
+    > "$run/stdout.log" 2> "$run/stderr.log"
+else
+  # Matches the DGL-Official-AMP launcher exactly: cold wall spans one
+  # numactl-bound Python process only, without an extra measurement wrapper.
   numactl --cpunodebind=0-3 --localalloc python -u "$test_py" \
-  > "$run/stdout.log" 2> "$run/stderr.log"
+    > "$run/stdout.log" 2> "$run/stderr.log"
+fi
 code=$?
 set -e
 end_ns=$(date +%s%N)
