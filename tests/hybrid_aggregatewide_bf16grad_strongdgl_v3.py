@@ -864,14 +864,14 @@ if requested_dtype != "fp32" and path == "dgl":
     # DGL gspmm requires node messages and edge weights to have identical
     # dtype. Autocast converts the node path but does not cast edge features.
     graph_arg = (graph_arg[0], graph_arg[1].to(torch.bfloat16))
-    if requested_dtype == "bf16_mixed":
-        # DGL may execute aggregation before its dense transform, so autocast
-        # alone leaves the first sparse input FP32. Keep activations/metadata
-        # BF16 explicitly while learnable parameters and Adam remain FP32.
-        x = x.to(torch.bfloat16)
-        model.force_bf16_activations = True
+if requested_dtype == "bf16_mixed" and path in ("dgl", "dgl_stock"):
+    # Strict official CPU autocast: model, Adam state and input stay FP32.
+    # Eligible operations choose BF16 inside the autocast scope below.
+    model.force_bf16_activations = False
 
-reported_dtype = requested_dtype
+reported_dtype = ("dgl_official_autocast_bf16_fp32_master"
+                  if path in ("dgl", "dgl_stock") and
+                  requested_dtype == "bf16_mixed" else requested_dtype)
 execution_plan_json = "[]"
 if (path == "hybrid" and os.environ.get("HYBRID_AMX_FORWARD") == "1" and
         os.environ.get("HYBRID_AMX_BACKWARD") == "1"):
