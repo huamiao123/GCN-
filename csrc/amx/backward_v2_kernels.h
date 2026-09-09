@@ -26,7 +26,8 @@ void amx_gemm_1c_baseline(const bf16* a, int rows_padded,
 void amx_gemm_4c_epilogue(const bf16* a, int rows_padded,
                           int reduction_padded,
                           const std::vector<bf16>& packed_b,
-                          int output_padded, int global_row0, int valid_rows,
+                          int output_padded, int output_stride,
+                          int global_row0, int valid_rows,
                           int logical_output, const float* scale,
                           const float* bias, float* c);
 

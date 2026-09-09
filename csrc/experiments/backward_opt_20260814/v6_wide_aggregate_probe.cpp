@@ -1626,7 +1626,8 @@ static std::vector<at::Tensor> c3_forward_amx_impl(
           }
           if (amx_gemm4) {
             bv2::amx_gemm_4c_epilogue(
-                a_block, 16, kp, packed_w, dp, row, valid, d, scale_p, bias_p,
+                a_block, 16, kp, packed_w, dp, dp, row, valid, d,
+                scale_p, bias_p,
                 cp + static_cast<std::size_t>(row) * dp);
           } else {
             bv2::amx_gemm_1c_baseline(
@@ -1761,6 +1762,245 @@ at::Tensor c3_prepare_static_hs_v1(const at::Tensor& x_in,
               threads >= 1 && threads <= 32,
               "static Hs preparation contract failed");
   return build_hs_bf16_exact(x, s, threads);
+}
+
+// Shadow-only supervision-scoped primitives.  These deliberately live next
+// to the authority kernels so the prototype reuses the same persistent worker
+// pool and BF16-round-before-accumulate contract.  They are not selected by
+// any authority execution plan.
+at::Tensor c3_selected_pull_bf16_shadow_v1(
+    const at::Tensor& hs_in, const at::Tensor& row_ids_in,
+    const at::Tensor& rowptr_in, const at::Tensor& colidx_in,
+    const at::Tensor& schedule_in, int64_t threads64) {
+  auto hs = hs_in.contiguous();
+  auto row_ids = row_ids_in.contiguous();
+  auto rowptr = rowptr_in.contiguous();
+  auto colidx = colidx_in.contiguous();
+  auto schedule = schedule_in.contiguous();
+  const int threads = static_cast<int>(threads64);
+  TORCH_CHECK(hs.device().is_cpu() && hs.scalar_type() == at::kBFloat16 &&
+              hs.dim() == 2 && hs.size(1) >= 1 && hs.size(1) <= 128,
+              "selected pull expects contiguous CPU BF16 Hs[N,K], K<=128");
+  TORCH_CHECK(row_ids.device().is_cpu() && row_ids.scalar_type() == at::kLong &&
+              row_ids.dim() == 1 && rowptr.device().is_cpu() &&
+              rowptr.scalar_type() == at::kLong && rowptr.dim() == 1 &&
+              rowptr.numel() == hs.size(0) + 1 && colidx.device().is_cpu() &&
+              colidx.scalar_type() == at::kLong && colidx.dim() == 1,
+              "selected pull CSR/index contract failed");
+  TORCH_CHECK(schedule.device().is_cpu() && schedule.scalar_type() == at::kLong &&
+              schedule.dim() == 1 && schedule.numel() == threads + 1 &&
+              threads >= 1 && threads <= 32,
+              "selected pull schedule must be int64[threads+1]");
+
+  const int n = static_cast<int>(hs.size(0));
+  const int k = static_cast<int>(hs.size(1));
+  const int m = static_cast<int>(row_ids.numel());
+  const bf16* src = reinterpret_cast<const bf16*>(hs.data_ptr<at::BFloat16>());
+  const std::int64_t* ids = row_ids.data_ptr<std::int64_t>();
+  const std::int64_t* rp = rowptr.data_ptr<std::int64_t>();
+  const std::int64_t* ci = colidx.data_ptr<std::int64_t>();
+  const std::int64_t* cuts = schedule.data_ptr<std::int64_t>();
+  auto out = at::empty({m, k}, hs.options());
+  bf16* dst = reinterpret_cast<bf16*>(out.data_ptr<at::BFloat16>());
+
+  parallel_workers(threads, [&](int tid) {
+    const std::int64_t begin = cuts[tid];
+    const std::int64_t end = cuts[tid + 1];
+    TORCH_CHECK(begin >= 0 && begin <= end && end <= m,
+                "selected pull schedule range is invalid");
+    for (std::int64_t pos = begin; pos < end; ++pos) {
+      const std::int64_t row64 = ids[pos];
+      TORCH_CHECK(row64 >= 0 && row64 < n,
+                  "selected pull row id is out of range");
+      const int row = static_cast<int>(row64);
+      bf16* out_row = dst + static_cast<std::size_t>(pos) * k;
+      for (int q = 0; q < k; q += 16) {
+        const int lanes = std::min(16, k - q);
+        auto load = [&](int source) {
+          const bf16* p = src + static_cast<std::size_t>(source) * k + q;
+          return lanes == 16 ? load_bf16x16_fp32(p)
+                             : load_bf16_tail_fp32(p, lanes);
+        };
+        __m512 sum = load(row);  // Authority CSR excludes the implicit self.
+        for (std::int64_t e = rp[row]; e < rp[row + 1]; ++e)
+          sum = _mm512_add_ps(sum, load(static_cast<int>(ci[e])));
+        store_fp32_tail_bf16(out_row + q, sum, lanes);
+      }
+    }
+  });
+  return out;
+}
+
+// Pull a rectangular CSR R[N,M] by compact BF16 Q[M,K].  Unlike the square
+// authority pull this function has no implicit self term: the one-time builder
+// inserts each selected destination's self contribution explicitly into R.
+at::Tensor c3_rect_pull_bf16_scaled_fp32_shadow_v1(
+    const at::Tensor& q_in, const at::Tensor& rowptr_in,
+    const at::Tensor& colidx_in, const at::Tensor& output_scale_in,
+    const at::Tensor& schedule_in, int64_t threads64) {
+  auto q = q_in.contiguous();
+  auto rowptr = rowptr_in.contiguous();
+  auto colidx = colidx_in.contiguous();
+  auto output_scale = output_scale_in.contiguous();
+  auto schedule = schedule_in.contiguous();
+  const int threads = static_cast<int>(threads64);
+  TORCH_CHECK(q.device().is_cpu() && q.scalar_type() == at::kBFloat16 &&
+              q.dim() == 2 && q.size(1) >= 1 && q.size(1) <= 128,
+              "rectangular pull expects CPU BF16 Q[M,K], K<=128");
+  TORCH_CHECK(rowptr.device().is_cpu() && rowptr.scalar_type() == at::kLong &&
+              rowptr.dim() == 1 && rowptr.numel() >= 2 &&
+              colidx.device().is_cpu() && colidx.scalar_type() == at::kLong &&
+              colidx.dim() == 1 && output_scale.device().is_cpu() &&
+              output_scale.scalar_type() == at::kFloat &&
+              output_scale.dim() == 1 &&
+              output_scale.numel() == rowptr.numel() - 1,
+              "rectangular pull CSR/scale contract failed");
+  TORCH_CHECK(schedule.device().is_cpu() && schedule.scalar_type() == at::kLong &&
+              schedule.dim() == 1 && schedule.numel() == threads + 1 &&
+              threads >= 1 && threads <= 32,
+              "rectangular pull schedule must be int64[threads+1]");
+
+  const int n = static_cast<int>(rowptr.numel() - 1);
+  const int m = static_cast<int>(q.size(0));
+  const int k = static_cast<int>(q.size(1));
+  const bf16* src = reinterpret_cast<const bf16*>(q.data_ptr<at::BFloat16>());
+  const std::int64_t* rp = rowptr.data_ptr<std::int64_t>();
+  const std::int64_t* ci = colidx.data_ptr<std::int64_t>();
+  const float* scale = output_scale.data_ptr<float>();
+  const std::int64_t* cuts = schedule.data_ptr<std::int64_t>();
+  auto out = at::empty({n, k}, output_scale.options());
+  float* dst = out.data_ptr<float>();
+
+  parallel_workers(threads, [&](int tid) {
+    const std::int64_t begin = cuts[tid];
+    const std::int64_t end = cuts[tid + 1];
+    TORCH_CHECK(begin >= 0 && begin <= end && end <= n,
+                "rectangular pull schedule range is invalid");
+    alignas(64) bf16 rounded[16];
+    for (std::int64_t row = begin; row < end; ++row) {
+      float* out_row = dst + static_cast<std::size_t>(row) * k;
+      for (int q0 = 0; q0 < k; q0 += 16) {
+        const int lanes = std::min(16, k - q0);
+        __m512 sum = _mm512_setzero_ps();
+        for (std::int64_t e = rp[row]; e < rp[row + 1]; ++e) {
+          const std::int64_t compact64 = ci[e];
+          TORCH_CHECK(compact64 >= 0 && compact64 < m,
+                      "rectangular pull compact column is out of range");
+          const bf16* p = src + static_cast<std::size_t>(compact64) * k + q0;
+          sum = _mm512_add_ps(sum, lanes == 16
+              ? load_bf16x16_fp32(p) : load_bf16_tail_fp32(p, lanes));
+        }
+        const __m256bh packed = _mm512_cvtneps_pbh(sum);
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(rounded),
+                            (__m256i)packed);
+        const __m512 restored = load_bf16_tail_fp32(rounded, lanes);
+        const __m512 scaled = _mm512_mul_ps(restored,
+                                            _mm512_set1_ps(scale[row]));
+        const __mmask16 mask = static_cast<__mmask16>((1u << lanes) - 1u);
+        _mm512_mask_storeu_ps(out_row + q0, mask, scaled);
+      }
+    }
+  });
+  return out;
+}
+
+at::Tensor c3_rect_pull_bf16_shadow_v1(
+    const at::Tensor& q_in, const at::Tensor& rowptr_in,
+    const at::Tensor& colidx_in, const at::Tensor& schedule_in,
+    int64_t threads64) {
+  auto q = q_in.contiguous();
+  auto rowptr = rowptr_in.contiguous();
+  auto colidx = colidx_in.contiguous();
+  auto schedule = schedule_in.contiguous();
+  const int threads = static_cast<int>(threads64);
+  TORCH_CHECK(q.device().is_cpu() && q.scalar_type() == at::kBFloat16 &&
+              q.dim() == 2 && q.size(1) >= 1 && q.size(1) <= 128,
+              "rectangular BF16 pull expects CPU BF16 Q[M,K], K<=128");
+  TORCH_CHECK(rowptr.device().is_cpu() && rowptr.scalar_type() == at::kLong &&
+              rowptr.dim() == 1 && rowptr.numel() >= 2 &&
+              colidx.device().is_cpu() && colidx.scalar_type() == at::kLong &&
+              colidx.dim() == 1 && schedule.device().is_cpu() &&
+              schedule.scalar_type() == at::kLong && schedule.dim() == 1 &&
+              schedule.numel() == threads + 1 && threads >= 1 && threads <= 32,
+              "rectangular BF16 pull CSR/schedule contract failed");
+  const int n = static_cast<int>(rowptr.numel() - 1);
+  const int m = static_cast<int>(q.size(0));
+  const int k = static_cast<int>(q.size(1));
+  const bf16* src = reinterpret_cast<const bf16*>(q.data_ptr<at::BFloat16>());
+  const std::int64_t* rp = rowptr.data_ptr<std::int64_t>();
+  const std::int64_t* ci = colidx.data_ptr<std::int64_t>();
+  const std::int64_t* cuts = schedule.data_ptr<std::int64_t>();
+  auto out = at::empty({n, k}, q.options());
+  bf16* dst = reinterpret_cast<bf16*>(out.data_ptr<at::BFloat16>());
+  parallel_workers(threads, [&](int tid) {
+    const std::int64_t begin = cuts[tid];
+    const std::int64_t end = cuts[tid + 1];
+    TORCH_CHECK(begin >= 0 && begin <= end && end <= n,
+                "rectangular BF16 pull schedule range is invalid");
+    for (std::int64_t row = begin; row < end; ++row) {
+      bf16* out_row = dst + static_cast<std::size_t>(row) * k;
+      for (int q0 = 0; q0 < k; q0 += 16) {
+        const int lanes = std::min(16, k - q0);
+        __m512 sum = _mm512_setzero_ps();
+        for (std::int64_t e = rp[row]; e < rp[row + 1]; ++e) {
+          const std::int64_t compact64 = ci[e];
+          TORCH_CHECK(compact64 >= 0 && compact64 < m,
+                      "rectangular BF16 pull compact column is out of range");
+          const bf16* p = src + static_cast<std::size_t>(compact64) * k + q0;
+          sum = _mm512_add_ps(sum, lanes == 16
+              ? load_bf16x16_fp32(p) : load_bf16_tail_fp32(p, lanes));
+        }
+        store_fp32_tail_bf16(out_row + q0, sum, lanes);
+      }
+    }
+  });
+  return out;
+}
+
+std::vector<at::Tensor> c3_build_selected_transpose_shadow_v1(
+    const at::Tensor& row_ids_in, const at::Tensor& rowptr_in,
+    const at::Tensor& colidx_in) {
+  auto row_ids = row_ids_in.contiguous();
+  auto rowptr = rowptr_in.contiguous();
+  auto colidx = colidx_in.contiguous();
+  TORCH_CHECK(row_ids.device().is_cpu() && row_ids.scalar_type() == at::kLong &&
+              row_ids.dim() == 1 && rowptr.device().is_cpu() &&
+              rowptr.scalar_type() == at::kLong && rowptr.dim() == 1 &&
+              rowptr.numel() >= 2 && colidx.device().is_cpu() &&
+              colidx.scalar_type() == at::kLong && colidx.dim() == 1,
+              "selected transpose builder expects CPU int64 tensors");
+  const std::int64_t n = rowptr.numel() - 1;
+  const std::int64_t m = row_ids.numel();
+  const std::int64_t* ids = row_ids.data_ptr<std::int64_t>();
+  const std::int64_t* rp = rowptr.data_ptr<std::int64_t>();
+  const std::int64_t* ci = colidx.data_ptr<std::int64_t>();
+  auto out_rp = at::zeros({n + 1}, rowptr.options());
+  std::int64_t* orp = out_rp.data_ptr<std::int64_t>();
+
+  std::int64_t entries = m;  // Explicit self contribution for every target.
+  for (std::int64_t j = 0; j < m; ++j) {
+    const std::int64_t row = ids[j];
+    TORCH_CHECK(row >= 0 && row < n, "selected transpose row is out of range");
+    ++orp[row + 1];
+    for (std::int64_t e = rp[row]; e < rp[row + 1]; ++e) {
+      TORCH_CHECK(ci[e] >= 0 && ci[e] < n,
+                  "selected transpose source is out of range");
+      ++orp[ci[e] + 1];
+      ++entries;
+    }
+  }
+  for (std::int64_t row = 0; row < n; ++row) orp[row + 1] += orp[row];
+  TORCH_CHECK(orp[n] == entries, "selected transpose entry count mismatch");
+  auto out_ci = at::empty({entries}, colidx.options());
+  std::int64_t* oci = out_ci.data_ptr<std::int64_t>();
+  std::vector<std::int64_t> cursor(orp, orp + n);
+  for (std::int64_t j = 0; j < m; ++j) {
+    const std::int64_t row = ids[j];
+    oci[cursor[static_cast<std::size_t>(row)]++] = j;
+    for (std::int64_t e = rp[row]; e < rp[row + 1]; ++e)
+      oci[cursor[static_cast<std::size_t>(ci[e])]++] = j;
+  }
+  return {out_rp, out_ci};
 }
 
 // V2 producer for a persistent Hs buffer with a 64-element AMX-safe row
@@ -2387,47 +2627,266 @@ std::vector<at::Tensor> c3_scale_grad_bf16_db_v2(
               "fused grad/db shape unsupported");
   auto out=at::empty({n,d},grad.options().dtype(at::kBFloat16));
   auto db=at::zeros({d},grad.options());
-  std::vector<float> partial(static_cast<std::size_t>(threads)*d,0.0f);
+  // A worker-wide FP32 sum may accumulate tens of thousands of rows and made
+  // db depend noticeably on the worker count for high-D supervision panels.
+  // Use fixed row chunks, then merge those chunk sums in FP64.  The chunk
+  // boundaries are independent of ``threads``, which both improves accuracy
+  // and keeps the reduction deterministic across planner thread choices.
+  constexpr int kDbChunkRows = 2048;
+  const int db_chunks = (n + kDbChunkRows - 1) / kDbChunkRows;
+  std::vector<float> partial(static_cast<std::size_t>(db_chunks)*d,0.0f);
   const float* gp=grad.data_ptr<float>();
   const float* sp=scale.data_ptr<float>();
   bf16* op=reinterpret_cast<bf16*>(out.data_ptr<at::BFloat16>());
   parallel_workers(threads,[&](int tid){
-    const int begin=n*tid/threads, end=n*(tid+1)/threads;
-    float* local=partial.data()+static_cast<std::size_t>(tid)*d;
-    for(int i=begin;i<end;++i){
-      const float* gr=gp+static_cast<std::size_t>(i)*d;
-      bf16* orow=op+static_cast<std::size_t>(i)*d;
-      const float sv=sp[i];
-      const __m512 svv=_mm512_set1_ps(sv);
-      int q=0;
-      for(;q+32<=d;q+=32){
-        const __m512 v0=_mm512_mul_ps(_mm512_loadu_ps(gr+q),svv);
-        const __m512 v1=_mm512_mul_ps(_mm512_loadu_ps(gr+q+16),svv);
-        _mm512_storeu_si512(reinterpret_cast<void*>(orow+q),
-            (__m512i)_mm512_cvtne2ps_pbh(v1,v0));
-        _mm512_storeu_ps(local+q,
-            _mm512_add_ps(_mm512_loadu_ps(local+q),
-                          _mm512_loadu_ps(gr+q)));
-        _mm512_storeu_ps(local+q+16,
-            _mm512_add_ps(_mm512_loadu_ps(local+q+16),
-                          _mm512_loadu_ps(gr+q+16)));
-      }
-      for(;q<d;++q){
-        orow[q]=to_bf16(gr[q]*sv);
-        local[q]+=gr[q];
+    for(int chunk=tid;chunk<db_chunks;chunk+=threads){
+      const int begin=chunk*kDbChunkRows;
+      const int end=std::min(n,begin+kDbChunkRows);
+      float* local=partial.data()+static_cast<std::size_t>(chunk)*d;
+      for(int i=begin;i<end;++i){
+        const float* gr=gp+static_cast<std::size_t>(i)*d;
+        bf16* orow=op+static_cast<std::size_t>(i)*d;
+        const float sv=sp[i];
+        const __m512 svv=_mm512_set1_ps(sv);
+        int q=0;
+        for(;q+32<=d;q+=32){
+          const __m512 v0=_mm512_mul_ps(_mm512_loadu_ps(gr+q),svv);
+          const __m512 v1=_mm512_mul_ps(_mm512_loadu_ps(gr+q+16),svv);
+          _mm512_storeu_si512(reinterpret_cast<void*>(orow+q),
+              (__m512i)_mm512_cvtne2ps_pbh(v1,v0));
+          _mm512_storeu_ps(local+q,
+              _mm512_add_ps(_mm512_loadu_ps(local+q),
+                            _mm512_loadu_ps(gr+q)));
+          _mm512_storeu_ps(local+q+16,
+              _mm512_add_ps(_mm512_loadu_ps(local+q+16),
+                            _mm512_loadu_ps(gr+q+16)));
+        }
+        for(;q<d;++q){
+          orow[q]=to_bf16(gr[q]*sv);
+          local[q]+=gr[q];
+        }
       }
     }
   });
   float* dbp=db.data_ptr<float>();
-  for(int tid=0;tid<threads;++tid){
-    const float* local=partial.data()+static_cast<std::size_t>(tid)*d;
-    for(int j=0;j<d;++j)dbp[j]+=local[j];
+  for(int j=0;j<d;++j){
+    double sum=0.0;
+    for(int chunk=0;chunk<db_chunks;++chunk)
+      sum+=partial[static_cast<std::size_t>(chunk)*d+j];
+    dbp[j]=static_cast<float>(sum);
   }
   if(internal_profile_enabled())
     std::cout<<std::fixed<<std::setprecision(6)
       <<"TFS_SCALE_DB rows="<<n<<",d="<<d<<",threads="<<threads
+      <<",db_chunks="<<db_chunks
       <<",partial_bytes="<<(partial.size()*sizeof(float))<<std::endl;
   return {out,db};
+}
+
+// Shadow-only compact dW gate for supervision-scoped terminal training.
+// Both inputs contain only supervised rows: P[M,K] and Gs[M,D], in BF16.
+// Reuse the established AMX dW microkernel, but keep every required layout
+// conversion, thread-local accumulator, deterministic reduction, and final
+// KxD scatter inside this call so an A/B against framework matmul is honest.
+at::Tensor c3_compact_dw_bf16_amx_shadow_v1(
+    const at::Tensor& pulled_in, const at::Tensor& gs_in,
+    int64_t threads64) {
+  const double profile_t0=now_ms();
+  auto pulled=pulled_in.contiguous(),gs=gs_in.contiguous();
+  TORCH_CHECK(pulled.device().is_cpu() && gs.device().is_cpu() &&
+              pulled.scalar_type()==at::kBFloat16 &&
+              gs.scalar_type()==at::kBFloat16,
+              "compact-dW shadow expects contiguous CPU BF16 tensors");
+  TORCH_CHECK(pulled.dim()==2 && gs.dim()==2 &&
+              pulled.size(0)==gs.size(0),
+              "compact-dW shadow shape contract failed");
+  const int m=static_cast<int>(pulled.size(0));
+  const int k=static_cast<int>(pulled.size(1));
+  const int d=static_cast<int>(gs.size(1));
+  const int threads=static_cast<int>(threads64);
+  TORCH_CHECK(m>=1 && k>=1 && k<=128 && d>=1 &&
+              threads>=1 && threads<=32,
+              "compact-dW shadow shape unsupported");
+  const int panel=512,dp=round_up(d,32),kp=round_up(k,64);
+  const int panel_count=(m+panel-1)/panel;
+  const bool direct_tail_transpose=experiment_flag("TFS_COMPACT_DW_T4");
+  const bf16* pp=reinterpret_cast<const bf16*>(
+      pulled.data_ptr<at::BFloat16>());
+  const bf16* gp=reinterpret_cast<const bf16*>(
+      gs.data_ptr<at::BFloat16>());
+
+  struct CompactDwWorkspace {
+    int dp,kp,threads;
+    AlignedBuffer<float> local,reduced;
+    std::vector<std::unique_ptr<Scratch>> scratch;
+    CompactDwWorkspace(int dp_in,int kp_in,int threads_in)
+        : dp(dp_in),kp(kp_in),threads(threads_in),
+          local(static_cast<std::size_t>(threads_in)*dp_in*kp_in),
+          reduced(static_cast<std::size_t>(dp_in)*kp_in) {
+      scratch.reserve(threads);
+      for(int tid=0;tid<threads;++tid)
+        scratch.emplace_back(std::make_unique<Scratch>(512,dp,kp));
+    }
+  };
+  static std::mutex compact_workspace_mutex;
+  static std::unique_ptr<CompactDwWorkspace> compact_workspace;
+  std::unique_lock<std::mutex> compact_workspace_lock(compact_workspace_mutex);
+  const bool workspace_reused=compact_workspace &&
+      compact_workspace->dp==dp && compact_workspace->kp==kp &&
+      compact_workspace->threads==threads;
+  if(!workspace_reused)
+    compact_workspace=std::make_unique<CompactDwWorkspace>(dp,kp,threads);
+  CompactDwWorkspace& workspace=*compact_workspace;
+  std::vector<double> transpose_ms(threads),pack_ms(threads),kernel_ms(threads);
+  const double profile_alloc=now_ms();
+
+  parallel_workers(threads,[&](int tid){
+    float* slab=workspace.local.data()+static_cast<std::size_t>(tid)*dp*kp;
+    std::fill(slab,slab+static_cast<std::size_t>(dp)*kp,0.0f);
+    bv2::configure_amx_tiles_16x64();
+    Scratch& z=*workspace.scratch[tid];
+    for(int p=tid;p<panel_count;p+=threads){
+      const int row0=p*panel,valid=std::min(panel,m-row0);
+      const int rows=round_up(valid,32);
+      const bf16* grad_panel=gp+static_cast<std::size_t>(row0)*d;
+      double q=now_ms();
+      if(direct_tail_transpose){
+        bv2::transpose_y_avx512_tail_t4(
+            grad_panel,valid,d,rows,dp,z.yt.data());
+      }else{
+        if(d!=dp || rows>valid){
+          for(int row=0;row<valid;++row){
+            std::memcpy(z.y.data()+static_cast<std::size_t>(row)*dp,
+                        grad_panel+static_cast<std::size_t>(row)*d,
+                        static_cast<std::size_t>(d)*sizeof(bf16));
+            std::fill(z.y.data()+static_cast<std::size_t>(row)*dp+d,
+                      z.y.data()+static_cast<std::size_t>(row+1)*dp,bf16(0));
+          }
+          std::fill(z.y.data()+static_cast<std::size_t>(valid)*dp,
+                    z.y.data()+static_cast<std::size_t>(rows)*dp,bf16(0));
+          grad_panel=z.y.data();
+        }
+        bv2::transpose_y_avx512_t2(grad_panel,rows,dp,z.yt.data());
+      }
+      transpose_ms[tid]+=now_ms()-q;q=now_ms();
+      bv2::pack_h_panel_direct_tail(pp,k,k,row0,valid,rows,kp,z.hp.data());
+      pack_ms[tid]+=now_ms()-q;q=now_ms();
+      bv2::dw_amx_4c2a2b(z.yt.data(),dp,rows,z.hp.data(),k,kp,slab,
+                          true,nullptr);
+      kernel_ms[tid]+=now_ms()-q;
+    }
+    _tile_release();
+  });
+  const double profile_kernel=now_ms();
+  reduce_dwt_parallel_deterministic(workspace.local.data(),threads,
+      runtime_per_numa(threads),dp*kp,workspace.reduced.data());
+  const double profile_reduce=now_ms();
+  auto dw=at::empty({k,d},at::TensorOptions().dtype(at::kFloat));
+  float* out=dw.data_ptr<float>();
+  for(int a=0;a<k;++a)for(int b=0;b<d;++b)
+    out[static_cast<std::size_t>(a)*d+b]=
+        workspace.reduced.data()[static_cast<std::size_t>(b)*kp+a];
+  const double profile_end=now_ms();
+  if(internal_profile_enabled()){
+    auto maxv=[](const std::vector<double>& v){
+      return *std::max_element(v.begin(),v.end());};
+    std::cout<<std::fixed<<std::setprecision(6)
+      <<"TFS_INTERNAL,kind=compact_dw_shadow,m="<<m<<",k="<<k
+      <<",d="<<d<<",threads="<<threads
+      <<",workspace_reused="<<(workspace_reused?1:0)
+      <<",direct_tail_transpose="<<(direct_tail_transpose?1:0)
+      <<",alloc_ms="<<(profile_alloc-profile_t0)
+      <<",transpose_ms="<<maxv(transpose_ms)
+      <<",pack_ms="<<maxv(pack_ms)
+      <<",dw_kernel_ms="<<maxv(kernel_ms)
+      <<",kernel_wall_ms="<<(profile_kernel-profile_alloc)
+      <<",reduce_ms="<<(profile_reduce-profile_kernel)
+      <<",scatter_ms="<<(profile_end-profile_reduce)
+      <<",total_ms="<<(profile_end-profile_t0)<<std::endl;
+  }
+  return dw;
+}
+
+// Shadow-only compact terminal GEMM.  This is the established high-D AMX
+// 4-C-tile kernel applied after supervision-scoped sparse pull; scale and bias
+// stay in the native epilogue.  Weight packing is deliberately included in
+// the call until a whole-terminal fused interface can safely reuse it.
+at::Tensor c3_compact_logits_amx_shadow_v1(
+    const at::Tensor& pulled_in, const at::Tensor& weight_in,
+    const at::Tensor& bias_in, const at::Tensor& scale_in,
+    int64_t threads64) {
+  const double t0=now_ms();
+  auto pulled=pulled_in.contiguous(),weight=weight_in.contiguous();
+  auto bias=bias_in.contiguous(),scale=scale_in.contiguous();
+  TORCH_CHECK(pulled.device().is_cpu() && weight.device().is_cpu() &&
+              bias.device().is_cpu() && scale.device().is_cpu() &&
+              pulled.scalar_type()==at::kBFloat16 &&
+              weight.scalar_type()==at::kBFloat16 &&
+              bias.scalar_type()==at::kFloat &&
+              scale.scalar_type()==at::kFloat,
+              "compact-logits shadow expects CPU BF16 P/W and FP32 bias/scale");
+  TORCH_CHECK(pulled.dim()==2 && weight.dim()==2 && bias.dim()==1 &&
+              scale.dim()==1 && pulled.size(1)==weight.size(0) &&
+              bias.numel()==weight.size(1) && scale.numel()==pulled.size(0),
+              "compact-logits shadow shape contract failed");
+  const int m=static_cast<int>(pulled.size(0));
+  const int k=static_cast<int>(pulled.size(1));
+  const int d=static_cast<int>(weight.size(1));
+  const int threads=static_cast<int>(threads64);
+  TORCH_CHECK(m>=1 && k>=1 && k<=128 && d>=1 && threads>=1 && threads<=32,
+              "compact-logits shadow shape unsupported");
+  const int kp=round_up(k,32),dp=round_up(d,16);
+  const bf16* pp=reinterpret_cast<const bf16*>(
+      pulled.data_ptr<at::BFloat16>());
+  const bf16* wp=reinterpret_cast<const bf16*>(
+      weight.data_ptr<at::BFloat16>());
+  const float* bp=bias.data_ptr<float>();
+  const float* sp=scale.data_ptr<float>();
+  std::vector<bf16> wpad(static_cast<std::size_t>(kp)*dp,bf16(0));
+  for(int q=0;q<k;++q)
+    std::memcpy(wpad.data()+static_cast<std::size_t>(q)*dp,
+                wp+static_cast<std::size_t>(q)*d,
+                static_cast<std::size_t>(d)*sizeof(bf16));
+  std::vector<bf16> packed_w(
+      static_cast<std::size_t>(kp/32)*(dp/16)*512,bf16(0));
+  pack_rhs_into(wpad.data(),kp,dp,packed_w.data());
+  const double packed_at=now_ms();
+  auto logits=at::empty({m,d},at::TensorOptions().dtype(at::kFloat));
+  float* out=logits.data_ptr<float>();
+  const int row_tiles=(m+15)/16;
+  parallel_workers(threads,[&](int tid){
+    bv2::configure_amx_tiles_16x64();
+    std::vector<bf16> a_pad;
+    if(kp!=k || (m%16)!=0)
+      a_pad.resize(static_cast<std::size_t>(16)*kp);
+    const int tile_begin=row_tiles*tid/threads;
+    const int tile_end=row_tiles*(tid+1)/threads;
+    for(int tile=tile_begin;tile<tile_end;++tile){
+      const int row=tile*16,valid=std::min(16,m-row);
+      const bf16* a=pp+static_cast<std::size_t>(row)*k;
+      if(valid!=16 || kp!=k){
+        std::fill(a_pad.begin(),a_pad.end(),bf16(0));
+        for(int i=0;i<valid;++i)
+          std::memcpy(a_pad.data()+static_cast<std::size_t>(i)*kp,
+                      pp+static_cast<std::size_t>(row+i)*k,
+                      static_cast<std::size_t>(k)*sizeof(bf16));
+        a=a_pad.data();
+      }
+      bv2::amx_gemm_4c_epilogue(
+          a,16,kp,packed_w,dp,d,row,valid,d,sp,bp,
+          out+static_cast<std::size_t>(row)*d);
+    }
+    _tile_release();
+  });
+  const double end=now_ms();
+  if(internal_profile_enabled())
+    std::cout<<std::fixed<<std::setprecision(6)
+      <<"TFS_INTERNAL,kind=compact_logits_shadow,m="<<m<<",k="<<k
+      <<",d="<<d<<",threads="<<threads
+      <<",pack_weight_ms="<<(packed_at-t0)
+      <<",gemm_epilogue_ms="<<(end-packed_at)
+      <<",total_ms="<<(end-t0)<<std::endl;
+  return logits;
 }
 
 // Generic aggregate-saved backward.  The forward has already materialized

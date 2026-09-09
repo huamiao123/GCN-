@@ -80,6 +80,38 @@ void transpose_y_avx512_t2(const bf16* y, int rows_padded, int d_padded,
   }
 }
 
+void transpose_y_avx512_tail_t4(const bf16* y, int valid_rows, int logical_d,
+                                int rows_padded, int d_padded, bf16* y_t) {
+  if (valid_rows < 0 || logical_d < 0 || valid_rows > rows_padded ||
+      logical_d > d_padded || (rows_padded % 16) != 0 ||
+      (d_padded % 16) != 0) {
+    throw std::invalid_argument("T4 logical/padded dimensions are invalid");
+  }
+  alignas(64) bf16 tail[16 * 16];
+  for (int row = 0; row < rows_padded; row += 16) {
+    for (int col = 0; col < d_padded; col += 16) {
+      bf16* dst = y_t + static_cast<std::size_t>(col) * rows_padded + row;
+      if (row + 16 <= valid_rows && col + 16 <= logical_d) {
+        transpose16x16_u16(
+            y + static_cast<std::size_t>(row) * logical_d + col,
+            logical_d, dst, rows_padded);
+        continue;
+      }
+      std::fill(tail, tail + 256, bf16(0));
+      const int copy_rows = std::max(0, std::min(16, valid_rows - row));
+      const int copy_cols = std::max(0, std::min(16, logical_d - col));
+      if (copy_cols > 0) {
+        for (int r = 0; r < copy_rows; ++r) {
+          std::memcpy(tail + r * 16,
+                      y + static_cast<std::size_t>(row + r) * logical_d + col,
+                      static_cast<std::size_t>(copy_cols) * sizeof(bf16));
+        }
+      }
+      transpose16x16_u16(tail, 16, dst, rows_padded);
+    }
+  }
+}
+
 namespace {
 
 inline void transpose16x16_u16_avx512_gather(const bf16* src, int src_stride,

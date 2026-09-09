@@ -2,6 +2,11 @@
 
 这是 TFS 数据流、维度泛化、workspace 和实验口径收口后的唯一正式版本。论文主方法只暴露一个 runtime；`native_c3`、V3、V4、High-D stream/single-scan 等名字仅是内部候选或消融项。
 
+> `codex/tfs-integrated-optimizations-20260909`在权威提交`2ffaa61`之上携带
+> supervision-scoped terminal与bounded-panel AMX研究代码，但不改变权威
+> planner的默认行为。权威基线、全部新增优化、源码路径、实测结果和未完成边界见
+> [INTEGRATED_OPTIMIZATIONS_20260909.md](INTEGRATED_OPTIMIZATIONS_20260909.md)。
+
 ## 正式边界
 
 - planner 只根据 `N/K/D`、层位置、静态性、线程数和内存预算选择，不读取数据集名称。

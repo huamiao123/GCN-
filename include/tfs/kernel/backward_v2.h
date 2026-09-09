@@ -47,6 +47,12 @@ void transpose_panel_scalar_t1(const bf16* y, int rows_padded, int d_padded,
 void transpose_y_avx512_t2(const bf16* y, int rows_padded, int d_padded,
                            bf16* y_t);
 
+// Transpose a logical row-major matrix with an unpadded source stride directly
+// into a padded D x rows panel.  Only the final row/column tiles use a small
+// zero-filled staging block; full 16x16 tiles never materialize a padded copy.
+void transpose_y_avx512_tail_t4(const bf16* y, int valid_rows, int logical_d,
+                                int rows_padded, int d_padded, bf16* y_t);
+
 // Literal AVX-512 implementation used as an ISA-width ablation. The selector
 // may still prefer the 256-bit unpack network when it is faster for 16 BF16s.
 void transpose_y_avx512_gather_t2(const bf16* y, int rows_padded,

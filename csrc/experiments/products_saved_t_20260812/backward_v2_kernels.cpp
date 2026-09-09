@@ -224,12 +224,14 @@ void amx_gemm_1c_baseline(const bf16* a, int rows_padded,
 void amx_gemm_4c_epilogue(const bf16* a, int rows_padded,
                           int reduction_padded,
                           const std::vector<bf16>& packed_b,
-                          int output_padded, int global_row0, int valid_rows,
+                          int output_padded, int output_stride,
+                          int global_row0, int valid_rows,
                           int logical_output, const float* scale,
                           const float* bias, float* c) {
   if (rows_padded % 16 != 0 || reduction_padded % 32 != 0 ||
       output_padded % 16 != 0 || valid_rows < 0 || valid_rows > rows_padded ||
-      logical_output < 1 || logical_output > output_padded) {
+      logical_output < 1 || logical_output > output_padded ||
+      output_stride < logical_output) {
     throw std::invalid_argument("AMX 4c forward shape unsupported");
   }
   const int output_blocks = output_padded / 16;
@@ -269,7 +271,7 @@ void amx_gemm_4c_epilogue(const bf16* a, int rows_padded,
           const int out_col = col + q * 16;
           if (out_col >= logical_output) break;
           const int lanes = std::min(16, logical_output - out_col);
-          float* dst = c + static_cast<std::size_t>(row + i) * output_padded +
+          float* dst = c + static_cast<std::size_t>(row + i) * output_stride +
               out_col;
           const __m512 value = _mm512_load_ps(tmp[q] + i * 16);
           const __mmask16 mask = static_cast<__mmask16>(
