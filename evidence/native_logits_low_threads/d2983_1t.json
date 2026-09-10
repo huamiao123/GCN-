@@ -1,0 +1,124 @@
+{
+  "status": "fail",
+  "contract": "real_igb_bounded_logits_ab_shadow_v1",
+  "ab_kind": "logits",
+  "output_dim": 2983,
+  "threads": 1,
+  "layers": 2,
+  "row_tile": 300000,
+  "correctness": {
+    "loss_abs": 0.0,
+    "dh": {
+      "max_abs": 1.1272192068645381e-09,
+      "relative_l2": 0.00012658163905143738
+    },
+    "dw": {
+      "max_abs": 1.4901161193847656e-08,
+      "relative_l2": 1.5510213415836915e-06
+    },
+    "db": {
+      "max_abs": 1.862645149230957e-09,
+      "relative_l2": 7.46594519540622e-09
+    }
+  },
+  "terminal": {
+    "torch_dw": {
+      "fused_forward_loss_ms": {
+        "median_ms": 10626.331658,
+        "mean_ms": 10631.142147555554,
+        "min_ms": 10600.737787,
+        "max_ms": 10664.609515
+      },
+      "backward_ms": {
+        "median_ms": 522.27943,
+        "mean_ms": 523.0718162222222,
+        "min_ms": 519.22808,
+        "max_ms": 529.679155
+      },
+      "elapsed_ms": {
+        "median_ms": 11150.53231,
+        "mean_ms": 11154.213963777778,
+        "min_ms": 11123.718496,
+        "max_ms": 11194.28867
+      }
+    },
+    "native_dw": {
+      "fused_forward_loss_ms": {
+        "median_ms": 8734.077815,
+        "mean_ms": 8741.763729111111,
+        "min_ms": 8690.881497,
+        "max_ms": 8811.152122
+      },
+      "backward_ms": {
+        "median_ms": 522.429117,
+        "mean_ms": 524.661613888889,
+        "min_ms": 521.580181,
+        "max_ms": 534.468358
+      },
+      "elapsed_ms": {
+        "median_ms": 9259.9777,
+        "mean_ms": 9266.425343,
+        "min_ms": 9213.310614,
+        "max_ms": 9333.105879
+      }
+    },
+    "speedup": 1.2041640564641967,
+    "paired_speedup_median": 1.2040509360814995
+  },
+  "train_step": {
+    "torch_dw": {
+      "fused_forward_loss_ms": {
+        "median_ms": 12125.908473,
+        "mean_ms": 12102.355400666667,
+        "min_ms": 12006.088082,
+        "max_ms": 12191.794388
+      },
+      "backward_ms": {
+        "median_ms": 2151.234415,
+        "mean_ms": 2159.494473777778,
+        "min_ms": 2146.63281,
+        "max_ms": 2190.226959
+      },
+      "optimizer_ms": {
+        "median_ms": 2.126635,
+        "mean_ms": 2.124324666666667,
+        "min_ms": 2.100535,
+        "max_ms": 2.145006
+      },
+      "elapsed_ms": {
+        "median_ms": 14301.464725,
+        "mean_ms": 14263.974199111111,
+        "min_ms": 14154.823304,
+        "max_ms": 14366.543771
+      }
+    },
+    "native_dw": {
+      "fused_forward_loss_ms": {
+        "median_ms": 10158.562642,
+        "mean_ms": 10123.2699,
+        "min_ms": 9918.405747,
+        "max_ms": 10304.732963
+      },
+      "backward_ms": {
+        "median_ms": 2144.835934,
+        "mean_ms": 2149.081700888889,
+        "min_ms": 2135.943278,
+        "max_ms": 2172.183132
+      },
+      "optimizer_ms": {
+        "median_ms": 2.084201,
+        "mean_ms": 2.302422888888889,
+        "min_ms": 2.03324,
+        "max_ms": 4.086731
+      },
+      "elapsed_ms": {
+        "median_ms": 12305.138808,
+        "mean_ms": 12274.654023777777,
+        "min_ms": 12060.224903,
+        "max_ms": 12462.757796
+      }
+    },
+    "speedup": 1.1622351399808768,
+    "paired_speedup_median": 1.1564497476292495
+  }
+}

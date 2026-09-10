@@ -1,0 +1,279 @@
+{
+  "status": "pass",
+  "contract": "authority_vs_complete_bounded_shadow_v1",
+  "dataset": "ogbn-products",
+  "threads": 2,
+  "layers": 3,
+  "output_dim": 47,
+  "row_tile": 196615,
+  "dense_plan": {
+    "fused_db": false,
+    "logsoftmax_out": true,
+    "native_dw": false,
+    "direct_tail_transpose": false,
+    "native_logits": false,
+    "rationale": [
+      "framework dW retained outside measured envelope",
+      "framework logits retained below high-D crossover",
+      "bounded exact CE uses row_tile=196615"
+    ]
+  },
+  "correctness": {
+    "loss_abs": 4.5299530029296875e-06,
+    "dh": {
+      "max_abs": 1.1628344509517774e-08,
+      "relative_l2": 0.0024018955882638693
+    },
+    "dw": {
+      "max_abs": 0.0004356503486633301,
+      "relative_l2": 0.0016946418909355998
+    },
+    "db": {
+      "max_abs": 4.209578037261963e-07,
+      "relative_l2": 2.3874590624473058e-06
+    }
+  },
+  "authority": {
+    "forward_loss_ms": {
+      "median_ms": 5772.692844,
+      "mean_ms": 5782.855054666667,
+      "min_ms": 5758.895938,
+      "max_ms": 5819.60217
+    },
+    "backward_ms": {
+      "median_ms": 4346.31819,
+      "mean_ms": 4345.943077888889,
+      "min_ms": 4340.241249,
+      "max_ms": 4351.404033
+    },
+    "optimizer_ms": {
+      "median_ms": 0.722574,
+      "mean_ms": 0.7226726666666667,
+      "min_ms": 0.702764,
+      "max_ms": 0.735446
+    },
+    "elapsed_ms": {
+      "median_ms": 10120.545238,
+      "mean_ms": 10129.520805222222,
+      "min_ms": 10102.164929,
+      "max_ms": 10165.839254
+    }
+  },
+  "complete_bounded": {
+    "forward_loss_ms": {
+      "median_ms": 4884.290995,
+      "mean_ms": 4873.283464,
+      "min_ms": 4816.099827,
+      "max_ms": 4911.4432
+    },
+    "backward_ms": {
+      "median_ms": 4260.376884,
+      "mean_ms": 4258.794900333333,
+      "min_ms": 4245.523248,
+      "max_ms": 4264.568901
+    },
+    "optimizer_ms": {
+      "median_ms": 0.713674,
+      "mean_ms": 0.7138427777777778,
+      "min_ms": 0.690493,
+      "max_ms": 0.726353
+    },
+    "elapsed_ms": {
+      "median_ms": 9137.869973,
+      "mean_ms": 9132.792207111112,
+      "min_ms": 9062.326212,
+      "max_ms": 9174.876173
+    }
+  },
+  "speedup": 1.1075387664634697,
+  "paired_speedup_median": 1.109218995932605,
+  "compute_speedup": {
+    "ratio_of_medians": 1.107546603351204,
+    "paired_ratio_median": 1.109225886239131
+  },
+  "optimizer_contaminated": false,
+  "authority_records": [
+    {
+      "loss": 2.6000797748565674,
+      "forward_loss_ms": 5759.884579,
+      "backward_ms": 4341.546069,
+      "optimizer_ms": 0.734281,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 10102.164929
+    },
+    {
+      "loss": 2.2061374187469482,
+      "forward_loss_ms": 5765.867847,
+      "backward_ms": 4346.31819,
+      "optimizer_ms": 0.733855,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 10112.919892
+    },
+    {
+      "loss": 1.910841941833496,
+      "forward_loss_ms": 5808.272784,
+      "backward_ms": 4348.020603,
+      "optimizer_ms": 0.735446,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 10157.028833
+    },
+    {
+      "loss": 1.6927282810211182,
+      "forward_loss_ms": 5772.692844,
+      "backward_ms": 4347.139663,
+      "optimizer_ms": 0.712731,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 10120.545238
+    },
+    {
+      "loss": 1.466895341873169,
+      "forward_loss_ms": 5815.325274,
+      "backward_ms": 4340.241249,
+      "optimizer_ms": 0.70926,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 10156.275783
+    },
+    {
+      "loss": 1.3150110244750977,
+      "forward_loss_ms": 5758.895938,
+      "backward_ms": 4351.404033,
+      "optimizer_ms": 0.722574,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 10111.022545
+    },
+    {
+      "loss": 1.209795355796814,
+      "forward_loss_ms": 5776.852453,
+      "backward_ms": 4347.400842,
+      "optimizer_ms": 0.721686,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 10124.974981
+    },
+    {
+      "loss": 1.1016943454742432,
+      "forward_loss_ms": 5768.301603,
+      "backward_ms": 4345.882732,
+      "optimizer_ms": 0.731457,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 10114.915792
+    },
+    {
+      "loss": 1.0029363632202148,
+      "forward_loss_ms": 5819.60217,
+      "backward_ms": 4345.53432,
+      "optimizer_ms": 0.702764,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 10165.839254
+    }
+  ],
+  "bounded_records": [
+    {
+      "loss": 2.6002285480499268,
+      "forward_loss_ms": 4899.484687,
+      "backward_ms": 4259.746644,
+      "optimizer_ms": 0.72244,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 9159.953771
+    },
+    {
+      "loss": 2.206352472305298,
+      "forward_loss_ms": 4896.177034,
+      "backward_ms": 4264.094414,
+      "optimizer_ms": 0.713674,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 9160.985122
+    },
+    {
+      "loss": 1.9108225107192993,
+      "forward_loss_ms": 4865.729121,
+      "backward_ms": 4258.7882,
+      "optimizer_ms": 0.725413,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 9125.242734
+    },
+    {
+      "loss": 1.6925671100616455,
+      "forward_loss_ms": 4842.358398,
+      "backward_ms": 4264.568901,
+      "optimizer_ms": 0.713495,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 9107.640794
+    },
+    {
+      "loss": 1.4669431447982788,
+      "forward_loss_ms": 4816.099827,
+      "backward_ms": 4245.523248,
+      "optimizer_ms": 0.703137,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 9062.326212
+    },
+    {
+      "loss": 1.3148890733718872,
+      "forward_loss_ms": 4884.290995,
+      "backward_ms": 4252.870797,
+      "optimizer_ms": 0.708181,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 9137.869973
+    },
+    {
+      "loss": 1.2097517251968384,
+      "forward_loss_ms": 4911.4432,
+      "backward_ms": 4262.711574,
+      "optimizer_ms": 0.721399,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 9174.876173
+    },
+    {
+      "loss": 1.1017677783966064,
+      "forward_loss_ms": 4840.173085,
+      "backward_ms": 4260.473441,
+      "optimizer_ms": 0.726353,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 9101.372879
+    },
+    {
+      "loss": 1.0028940439224243,
+      "forward_loss_ms": 4903.794829,
+      "backward_ms": 4260.376884,
+      "optimizer_ms": 0.690493,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 9164.862206
+    }
+  ]
+}

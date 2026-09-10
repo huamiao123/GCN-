@@ -1,0 +1,279 @@
+{
+  "status": "pass",
+  "contract": "authority_vs_complete_bounded_shadow_v1",
+  "dataset": "ogbn-products",
+  "threads": 16,
+  "layers": 3,
+  "output_dim": 47,
+  "row_tile": 196615,
+  "dense_plan": {
+    "fused_db": false,
+    "logsoftmax_out": true,
+    "native_dw": false,
+    "direct_tail_transpose": false,
+    "native_logits": false,
+    "rationale": [
+      "framework dW retained outside measured envelope",
+      "framework logits retained below high-D crossover",
+      "bounded exact CE uses row_tile=196615"
+    ]
+  },
+  "correctness": {
+    "loss_abs": 1.1920928955078125e-06,
+    "dh": {
+      "max_abs": 1.30301032186253e-08,
+      "relative_l2": 0.002407556865364313
+    },
+    "dw": {
+      "max_abs": 0.00033718347549438477,
+      "relative_l2": 0.0016057725297287107
+    },
+    "db": {
+      "max_abs": 1.6391277313232422e-07,
+      "relative_l2": 1.0749662351372535e-06
+    }
+  },
+  "authority": {
+    "forward_loss_ms": {
+      "median_ms": 763.796706,
+      "mean_ms": 768.6798516666667,
+      "min_ms": 756.855438,
+      "max_ms": 791.223023
+    },
+    "backward_ms": {
+      "median_ms": 596.434818,
+      "mean_ms": 600.6619821111111,
+      "min_ms": 593.199027,
+      "max_ms": 624.459108
+    },
+    "optimizer_ms": {
+      "median_ms": 0.809699,
+      "mean_ms": 0.9467646666666667,
+      "min_ms": 0.739598,
+      "max_ms": 1.693312
+    },
+    "elapsed_ms": {
+      "median_ms": 1362.487668,
+      "mean_ms": 1370.2885984444445,
+      "min_ms": 1354.474394,
+      "max_ms": 1416.429508
+    }
+  },
+  "complete_bounded": {
+    "forward_loss_ms": {
+      "median_ms": 702.526433,
+      "mean_ms": 705.0090191111111,
+      "min_ms": 696.626441,
+      "max_ms": 723.540009
+    },
+    "backward_ms": {
+      "median_ms": 569.698189,
+      "mean_ms": 569.6013188888888,
+      "min_ms": 562.695111,
+      "max_ms": 574.49744
+    },
+    "optimizer_ms": {
+      "median_ms": 0.807621,
+      "mean_ms": 1.1678365555555557,
+      "min_ms": 0.734242,
+      "max_ms": 1.767729
+    },
+    "elapsed_ms": {
+      "median_ms": 1274.350786,
+      "mean_ms": 1275.7781745555556,
+      "min_ms": 1265.470714,
+      "max_ms": 1293.272075
+    }
+  },
+  "speedup": 1.069162182790069,
+  "paired_speedup_median": 1.07033246918743,
+  "compute_speedup": {
+    "ratio_of_medians": 1.0691252686425623,
+    "paired_ratio_median": 1.0703999433458695
+  },
+  "optimizer_contaminated": false,
+  "authority_records": [
+    {
+      "loss": 2.5294110774993896,
+      "forward_loss_ms": 772.601696,
+      "backward_ms": 603.491966,
+      "optimizer_ms": 0.799718,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1376.89338
+    },
+    {
+      "loss": 2.048140287399292,
+      "forward_loss_ms": 758.134826,
+      "backward_ms": 594.646256,
+      "optimizer_ms": 1.693312,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1354.474394
+    },
+    {
+      "loss": 1.7611196041107178,
+      "forward_loss_ms": 791.223023,
+      "backward_ms": 624.459108,
+      "optimizer_ms": 0.747377,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1416.429508
+    },
+    {
+      "loss": 1.5361250638961792,
+      "forward_loss_ms": 763.796706,
+      "backward_ms": 593.199027,
+      "optimizer_ms": 1.321428,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 1,
+      "elapsed_ms": 1358.317161
+    },
+    {
+      "loss": 1.343894362449646,
+      "forward_loss_ms": 759.253265,
+      "backward_ms": 602.39595,
+      "optimizer_ms": 0.838453,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1362.487668
+    },
+    {
+      "loss": 1.2213521003723145,
+      "forward_loss_ms": 756.855438,
+      "backward_ms": 601.867658,
+      "optimizer_ms": 0.754872,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1359.477968
+    },
+    {
+      "loss": 1.1070095300674438,
+      "forward_loss_ms": 773.922638,
+      "backward_ms": 594.298592,
+      "optimizer_ms": 0.739598,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1368.960828
+    },
+    {
+      "loss": 1.0048209428787231,
+      "forward_loss_ms": 781.240519,
+      "backward_ms": 596.434818,
+      "optimizer_ms": 0.816425,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1378.491762
+    },
+    {
+      "loss": 0.9380994439125061,
+      "forward_loss_ms": 761.090554,
+      "backward_ms": 595.164464,
+      "optimizer_ms": 0.809699,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1357.064717
+    }
+  ],
+  "bounded_records": [
+    {
+      "loss": 2.5293827056884766,
+      "forward_loss_ms": 701.838791,
+      "backward_ms": 567.848959,
+      "optimizer_ms": 1.581812,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1271.269562
+    },
+    {
+      "loss": 2.0481650829315186,
+      "forward_loss_ms": 701.113889,
+      "backward_ms": 562.695111,
+      "optimizer_ms": 1.661714,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1265.470714
+    },
+    {
+      "loss": 1.761307954788208,
+      "forward_loss_ms": 723.540009,
+      "backward_ms": 568.997824,
+      "optimizer_ms": 0.734242,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1293.272075
+    },
+    {
+      "loss": 1.5362167358398438,
+      "forward_loss_ms": 702.526433,
+      "backward_ms": 572.951479,
+      "optimizer_ms": 0.749471,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1276.227383
+    },
+    {
+      "loss": 1.3438977003097534,
+      "forward_loss_ms": 708.751882,
+      "backward_ms": 565.746053,
+      "optimizer_ms": 1.767729,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1276.265664
+    },
+    {
+      "loss": 1.221300721168518,
+      "forward_loss_ms": 708.052596,
+      "backward_ms": 569.698189,
+      "optimizer_ms": 1.697812,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 4,
+      "elapsed_ms": 1279.448597
+    },
+    {
+      "loss": 1.1070133447647095,
+      "forward_loss_ms": 696.626441,
+      "backward_ms": 574.49744,
+      "optimizer_ms": 0.769886,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1271.893767
+    },
+    {
+      "loss": 1.004797101020813,
+      "forward_loss_ms": 702.882622,
+      "backward_ms": 570.727922,
+      "optimizer_ms": 0.740242,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1274.350786
+    },
+    {
+      "loss": 0.9380323886871338,
+      "forward_loss_ms": 699.748509,
+      "backward_ms": 573.248893,
+      "optimizer_ms": 0.807621,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 1273.805023
+    }
+  ]
+}

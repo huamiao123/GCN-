@@ -1,0 +1,279 @@
+{
+  "status": "pass",
+  "contract": "authority_vs_complete_bounded_shadow_v1",
+  "dataset": "ogbn-products",
+  "threads": 1,
+  "layers": 2,
+  "output_dim": 47,
+  "row_tile": 196615,
+  "dense_plan": {
+    "fused_db": false,
+    "logsoftmax_out": true,
+    "native_dw": false,
+    "direct_tail_transpose": false,
+    "native_logits": false,
+    "rationale": [
+      "framework dW retained outside measured envelope",
+      "framework logits retained below high-D crossover",
+      "bounded exact CE uses row_tile=196615"
+    ]
+  },
+  "correctness": {
+    "loss_abs": 2.384185791015625e-07,
+    "dh": {
+      "max_abs": 1.3589897207566537e-08,
+      "relative_l2": 0.002400153549388051
+    },
+    "dw": {
+      "max_abs": 0.00023202598094940186,
+      "relative_l2": 0.0015507687348872423
+    },
+    "db": {
+      "max_abs": 9.5367431640625e-06,
+      "relative_l2": 2.917589881690219e-05
+    }
+  },
+  "authority": {
+    "forward_loss_ms": {
+      "median_ms": 5035.574847,
+      "mean_ms": 5033.626107666667,
+      "min_ms": 5021.257389,
+      "max_ms": 5051.452741
+    },
+    "backward_ms": {
+      "median_ms": 2535.719991,
+      "mean_ms": 2535.9887176666666,
+      "min_ms": 2533.98324,
+      "max_ms": 2538.756497
+    },
+    "optimizer_ms": {
+      "median_ms": 0.50177,
+      "mean_ms": 0.49848355555555557,
+      "min_ms": 0.476934,
+      "max_ms": 0.521561
+    },
+    "elapsed_ms": {
+      "median_ms": 7570.619561,
+      "mean_ms": 7570.113308888889,
+      "min_ms": 7555.719754,
+      "max_ms": 7587.67648
+    }
+  },
+  "complete_bounded": {
+    "forward_loss_ms": {
+      "median_ms": 3224.196462,
+      "mean_ms": 3223.451424111111,
+      "min_ms": 3216.071493,
+      "max_ms": 3231.485024
+    },
+    "backward_ms": {
+      "median_ms": 2513.564006,
+      "mean_ms": 2513.4399955555555,
+      "min_ms": 2508.730162,
+      "max_ms": 2518.758852
+    },
+    "optimizer_ms": {
+      "median_ms": 0.488434,
+      "mean_ms": 0.4839116666666667,
+      "min_ms": 0.457485,
+      "max_ms": 0.495659
+    },
+    "elapsed_ms": {
+      "median_ms": 5740.831008,
+      "mean_ms": 5737.375331333334,
+      "min_ms": 5725.579468,
+      "max_ms": 5745.466834
+    }
+  },
+  "speedup": 1.3187323491059293,
+  "paired_speedup_median": 1.3194388672109727,
+  "compute_speedup": {
+    "ratio_of_medians": 1.318757355109894,
+    "paired_ratio_median": 1.3194623961452399
+  },
+  "optimizer_contaminated": false,
+  "authority_records": [
+    {
+      "loss": 2.7553727626800537,
+      "forward_loss_ms": 5025.314731,
+      "backward_ms": 2534.875412,
+      "optimizer_ms": 0.50177,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 7560.691913
+    },
+    {
+      "loss": 2.3422627449035645,
+      "forward_loss_ms": 5044.83887,
+      "backward_ms": 2538.40869,
+      "optimizer_ms": 0.476934,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 7583.724494
+    },
+    {
+      "loss": 1.999836802482605,
+      "forward_loss_ms": 5021.257389,
+      "backward_ms": 2533.98324,
+      "optimizer_ms": 0.479125,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 7555.719754
+    },
+    {
+      "loss": 1.7278976440429688,
+      "forward_loss_ms": 5035.707967,
+      "backward_ms": 2536.680307,
+      "optimizer_ms": 0.512435,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 7572.900709
+    },
+    {
+      "loss": 1.5172667503356934,
+      "forward_loss_ms": 5025.384531,
+      "backward_ms": 2534.324407,
+      "optimizer_ms": 0.490264,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 7560.199202
+    },
+    {
+      "loss": 1.3569368124008179,
+      "forward_loss_ms": 5035.574847,
+      "backward_ms": 2534.563111,
+      "optimizer_ms": 0.481603,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 7570.619561
+    },
+    {
+      "loss": 1.2340426445007324,
+      "forward_loss_ms": 5051.452741,
+      "backward_ms": 2535.719991,
+      "optimizer_ms": 0.503748,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 7587.67648
+    },
+    {
+      "loss": 1.1371586322784424,
+      "forward_loss_ms": 5036.28485,
+      "backward_ms": 2538.756497,
+      "optimizer_ms": 0.518912,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 7575.560259
+    },
+    {
+      "loss": 1.0560829639434814,
+      "forward_loss_ms": 5026.819043,
+      "backward_ms": 2536.586804,
+      "optimizer_ms": 0.521561,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 7563.927408
+    }
+  ],
+  "bounded_records": [
+    {
+      "loss": 2.7553975582122803,
+      "forward_loss_ms": 3226.938466,
+      "backward_ms": 2518.053948,
+      "optimizer_ms": 0.47442,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 5745.466834
+    },
+    {
+      "loss": 2.342257499694824,
+      "forward_loss_ms": 3219.827224,
+      "backward_ms": 2518.758852,
+      "optimizer_ms": 0.494173,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 5739.080249
+    },
+    {
+      "loss": 1.9998122453689575,
+      "forward_loss_ms": 3231.485024,
+      "backward_ms": 2509.953061,
+      "optimizer_ms": 0.493879,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 5741.931964
+    },
+    {
+      "loss": 1.727910041809082,
+      "forward_loss_ms": 3216.071493,
+      "backward_ms": 2509.01537,
+      "optimizer_ms": 0.492605,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 5725.579468
+    },
+    {
+      "loss": 1.5172709226608276,
+      "forward_loss_ms": 3222.327173,
+      "backward_ms": 2508.730162,
+      "optimizer_ms": 0.488434,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 5731.545769
+    },
+    {
+      "loss": 1.3569451570510864,
+      "forward_loss_ms": 3217.111984,
+      "backward_ms": 2510.420842,
+      "optimizer_ms": 0.457485,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 5727.990311
+    },
+    {
+      "loss": 1.234021782875061,
+      "forward_loss_ms": 3225.663138,
+      "backward_ms": 2516.303224,
+      "optimizer_ms": 0.484499,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 5742.450861
+    },
+    {
+      "loss": 1.1371448040008545,
+      "forward_loss_ms": 3227.441853,
+      "backward_ms": 2513.564006,
+      "optimizer_ms": 0.495659,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 5741.501518
+    },
+    {
+      "loss": 1.0561290979385376,
+      "forward_loss_ms": 3224.196462,
+      "backward_ms": 2516.160495,
+      "optimizer_ms": 0.474051,
+      "optimizer_minor_faults": 0,
+      "optimizer_major_faults": 0,
+      "optimizer_involuntary_context_switches": 0,
+      "elapsed_ms": 5740.831008
+    }
+  ]
+}

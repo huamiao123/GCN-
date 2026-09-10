@@ -22,6 +22,17 @@ def test_compact_dw_layouts_match_framework(monkeypatch):
         assert relative_l2(actual, reference) < 0.01
 
 
+def test_compact_dw_v2_selects_layout_without_environment(monkeypatch):
+    torch.manual_seed(18)
+    pulled = torch.randn(67, 128, dtype=torch.bfloat16)
+    gs = torch.randn(67, 47, dtype=torch.bfloat16)
+    reference = torch.matmul(pulled.transpose(0, 1).contiguous(), gs).float()
+    monkeypatch.setenv("TFS_COMPACT_DW_T4", "0")
+    actual = backend().c3_compact_dw_bf16_amx_shadow_v2(
+        pulled, gs, 1, True)
+    assert relative_l2(actual, reference) < 0.01
+
+
 def test_compact_logits_is_contiguous_and_matches_framework():
     torch.manual_seed(19)
     pulled = torch.randn(67, 128, dtype=torch.bfloat16)

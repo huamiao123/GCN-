@@ -1,0 +1,124 @@
+{
+  "status": "fail",
+  "contract": "real_igb_bounded_logits_ab_shadow_v1",
+  "ab_kind": "logits",
+  "output_dim": 2983,
+  "threads": 2,
+  "layers": 2,
+  "row_tile": 300000,
+  "correctness": {
+    "loss_abs": 0.0,
+    "dh": {
+      "max_abs": 7.305942517632502e-10,
+      "relative_l2": 0.00012453077943064272
+    },
+    "dw": {
+      "max_abs": 2.9802322387695312e-08,
+      "relative_l2": 1.6155624962266302e-06
+    },
+    "db": {
+      "max_abs": 7.450580596923828e-09,
+      "relative_l2": 2.794766196245746e-08
+    }
+  },
+  "terminal": {
+    "torch_dw": {
+      "fused_forward_loss_ms": {
+        "median_ms": 5559.324595,
+        "mean_ms": 5551.696449888889,
+        "min_ms": 5535.905294,
+        "max_ms": 5563.984526
+      },
+      "backward_ms": {
+        "median_ms": 279.826308,
+        "mean_ms": 279.61034911111113,
+        "min_ms": 278.809149,
+        "max_ms": 280.378463
+      },
+      "elapsed_ms": {
+        "median_ms": 5838.246085,
+        "mean_ms": 5831.306799,
+        "min_ms": 5815.926063,
+        "max_ms": 5843.366591
+      }
+    },
+    "native_dw": {
+      "fused_forward_loss_ms": {
+        "median_ms": 4661.827401,
+        "mean_ms": 4661.034001666667,
+        "min_ms": 4583.476259,
+        "max_ms": 4754.868159
+      },
+      "backward_ms": {
+        "median_ms": 278.332081,
+        "mean_ms": 278.2988897777778,
+        "min_ms": 278.050417,
+        "max_ms": 278.538578
+      },
+      "elapsed_ms": {
+        "median_ms": 4940.159482,
+        "mean_ms": 4939.332891444445,
+        "min_ms": 4861.747446,
+        "max_ms": 5032.918576
+      }
+    },
+    "speedup": 1.1817930385187512,
+    "paired_speedup_median": 1.1825049305159254
+  },
+  "train_step": {
+    "torch_dw": {
+      "fused_forward_loss_ms": {
+        "median_ms": 6326.494764,
+        "mean_ms": 6331.199286222222,
+        "min_ms": 6318.097125,
+        "max_ms": 6353.653488
+      },
+      "backward_ms": {
+        "median_ms": 1100.000486,
+        "mean_ms": 1099.7686353333333,
+        "min_ms": 1096.028403,
+        "max_ms": 1102.399473
+      },
+      "optimizer_ms": {
+        "median_ms": 1.397908,
+        "mean_ms": 1.4010457777777778,
+        "min_ms": 1.389866,
+        "max_ms": 1.41556
+      },
+      "elapsed_ms": {
+        "median_ms": 7430.290648,
+        "mean_ms": 7432.368967333333,
+        "min_ms": 7417.05251,
+        "max_ms": 7456.310465
+      }
+    },
+    "native_dw": {
+      "fused_forward_loss_ms": {
+        "median_ms": 5494.437874,
+        "mean_ms": 5489.736513333333,
+        "min_ms": 5433.04886,
+        "max_ms": 5520.782199
+      },
+      "backward_ms": {
+        "median_ms": 1102.672656,
+        "mean_ms": 1102.3919523333334,
+        "min_ms": 1099.721341,
+        "max_ms": 1105.025439
+      },
+      "optimizer_ms": {
+        "median_ms": 1.397726,
+        "mean_ms": 1.3992157777777778,
+        "min_ms": 1.390151,
+        "max_ms": 1.420067
+      },
+      "elapsed_ms": {
+        "median_ms": 6595.550885,
+        "mean_ms": 6593.527681444444,
+        "min_ms": 6534.451418,
+        "max_ms": 6625.385326
+      }
+    },
+    "speedup": 1.126561037516732,
+    "paired_speedup_median": 1.1271736791399192
+  }
+}

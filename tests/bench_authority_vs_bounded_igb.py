@@ -19,18 +19,20 @@ from bench_supervision_scoped_products import (load_products, metric,
                                                 phase_summary)
 from tfs_train.authority_model import HybridGCN
 from tfs_train.datasets import load_igb_homogeneous
+from tfs_train.supervision_dense_plan import plan_supervision_dense
 from tfs_train.supervision_scope import (SupervisionScope,
                                          terminal_cross_entropy,
                                          train_cross_entropy)
 
 
-def terminal_once(hidden, terminal, graph, scope, labels, bounded, row_tile):
+def terminal_once(hidden, terminal, graph, scope, labels, bounded, row_tile,
+                  dense_plan=None):
     terminal.zero_grad(set_to_none=True)
     h = hidden.detach().requires_grad_(True)
     begin = time.perf_counter_ns()
     if bounded:
         loss = terminal_cross_entropy(h, terminal, graph, scope, labels,
-                                      row_tile)
+                                      row_tile, dense_plan)
     else:
         logits = terminal(h, graph)
         loss = F.cross_entropy(logits[scope.row_ids], labels[scope.row_ids])
@@ -46,13 +48,14 @@ def terminal_once(hidden, terminal, graph, scope, labels, bounded, row_tile):
 
 
 def train_once(model, x, labels, graph, scope, optimizer, bounded, row_tile,
-               seed):
+               seed, dense_plan=None):
     torch.manual_seed(seed)
     model.train()
     optimizer.zero_grad(set_to_none=True)
     begin = time.perf_counter_ns()
     if bounded:
-        loss = train_cross_entropy(model, x, labels, graph, scope, row_tile)
+        loss = train_cross_entropy(
+            model, x, labels, graph, scope, row_tile, dense_plan)
     else:
         logits = model(x, graph)
         loss = F.cross_entropy(logits[scope.row_ids], labels[scope.row_ids])
@@ -117,6 +120,12 @@ def main():
         raise ValueError(f"unsupported SCOPE_DATASET={dataset!r}")
     x, labels, graph = ds.x.contiguous(), ds.labels, ds.graph
     scope = SupervisionScope.build(ds.train_mask, graph, threads)
+    use_dense_plan = os.environ.get("SCOPE_USE_DENSE_PLAN", "0") == "1"
+    dense_plan = None
+    if use_dense_plan:
+        dense_plan = plan_supervision_dense(
+            scope.selected_count, 128, out_dim, threads)
+        row_tile = dense_plan.row_tile
     base = HybridGCN(threads, layers, dropout=0.5, in_dim=x.shape[1],
                      hidden_dim=128, out_dim=out_dim, num_nodes=x.shape[0])
     candidate = HybridGCN(threads, layers, dropout=0.5, in_dim=x.shape[1],
@@ -131,7 +140,7 @@ def main():
     ref = terminal_once(hidden, base.convs[-1], graph, scope, labels, False,
                         row_tile)
     new = terminal_once(hidden, candidate.convs[-1], graph, scope, labels,
-                        True, row_tile)
+                        True, row_tile, dense_plan)
     correctness = {"loss_abs": abs(ref["loss"] - new["loss"]),
                    "dh": metric(ref["dh"], new["dh"]),
                    "dw": metric(ref["dw"], new["dw"]),
@@ -151,7 +160,7 @@ def main():
             values[bounded] = train_once(
                 candidate if bounded else base, x, labels, graph, scope,
                 new_opt if bounded else base_opt, bounded, row_tile,
-                19000 + iteration)
+                19000 + iteration, dense_plan if bounded else None)
         if iteration >= warmups:
             old_records.append(strip(values[False]))
             new_records.append(strip(values[True]))
@@ -171,6 +180,15 @@ def main():
                "dataset": dataset, "threads": threads,
                "layers": layers, "output_dim": out_dim,
                "row_tile": row_tile,
+               "dense_plan": None if dense_plan is None else {
+                   "fused_db": dense_plan.fused_db,
+                   "logsoftmax_out": dense_plan.logsoftmax_out,
+                   "native_dw": dense_plan.native_dw,
+                   "direct_tail_transpose":
+                       dense_plan.direct_tail_transpose,
+                   "native_logits": dense_plan.native_logits,
+                   "rationale": dense_plan.rationale,
+               },
                "correctness": correctness,
                "authority": phase_summary(old_records),
                "complete_bounded": phase_summary(new_records),

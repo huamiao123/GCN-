@@ -203,6 +203,7 @@ P[M,K] -> P^T.contiguous() -> torch.matmul(P^T, Gs)
 源码：
 
 - `c3_compact_dw_bf16_amx_shadow_v1`
+- `c3_compact_dw_bf16_amx_shadow_v2`（显式planner参数，不读取全局环境）
 - `TFS_SCOPE_NATIVE_DW`
 - `tests/bench_compact_dw_amx_shadow.py`
 - `tests/bench_native_dw_scope_igb.py`
@@ -244,15 +245,41 @@ FP32 oracle显示该路径保持FP32 accumulator；它与PyTorch BF16-output的�
 (M, K, D, threads, padding)
 ```
 
-选择native dW、T4和native logits。它只覆盖已经测量的shadow区域，不修改
-权威planner，也不按数据集名称分派。
+选择bounded row tile、原地log-softmax、确定性fused-db、native dW、T4和
+native logits。计划携带完整的`(M,K,D,threads)`形状合同；执行前会再次校验，
+错误复用到不同形状会直接拒绝。planner通过`dense_plan`参数显式进入
+`terminal_cross_entropy`/`train_cross_entropy`，不再依赖进程级环境变量，
+也不按数据集名称分派。未传入plan时仍保留旧环境变量入口，只用于复现历史
+A/B，不改变冻结权威入口。
 
 源码：
 
 - `python/tfs_train/supervision_dense_plan.py`
 - `tests/test_supervision_dense_plan.py`
 
-这仍是初步经验planner，不应宣称为已经完成的通用cost model。
+这仍是测量包络内的保守经验planner，不应宣称为已经完成的通用cost model；
+低于8线程或未测形状会保留framework dense路径。
+
+### 3.9 已测的稀疏预取与NUMA副本边界
+
+当前C++稀疏pull含有显式开关`TFS_SPARSE_PREFETCH`：处理当前邻接条目时，
+提前读取距离4的源BF16行的4条cache line。4组交错paired重复、去掉首epoch后，
+以“每次重复的稳态中位数，再对同模式取中位数”统计：
+
+| 工作负载 | off中位数 | on中位数 | off/on |
+|---|---:|---:|---:|
+| Products 8T | 2393.780 ms | 2223.207 ms | 1.0767x |
+| Products 32T | 659.295 ms | 622.574 ms | 1.0590x |
+| IGB-small低D 8T | 659.366 ms | 631.580 ms | 1.0440x |
+| IGB-small低D 32T | 244.518 ms | 237.433 ms | 1.0298x |
+
+它是稳定的工程收益，但“软件预取”本身不是核心创新，且尚未与新末层planner做
+联合矩阵，所以继续保持显式开关。
+
+相反，gradient NUMA replica在Products 32T与IGB-small低D 32T分别只有
+`0.9208x`和`0.8707x`（off/on，小于1表示开启更慢），因此没有进入planner。
+这项负结果说明不能把“复制以减少remote read”无条件当成NUMA优化；复制、
+首触及和额外工作集成本在当前单路四NUMA域上超过了收益。
 
 ## 4. 已验证结果与边界
 
@@ -262,6 +289,8 @@ FP32 oracle显示该路径保持FP32 accumulator；它与PyTorch BF16-output的�
 |---|---|---:|
 | IGB-small，D=2983，L2，32T | 权威TFS / supervision+bounded | 1.763x |
 | IGB-small，D=2983，L2，32T | 权威TFS / 加入native dW | 2.0965x |
+| IGB-small，D=2983，L2，32T | 权威TFS / 最终环境变量候选（row tile=300k） | 2.3468x |
+| IGB-small，D=2983，L2，32T | 权威TFS / 显式planner（2026-09-10复验） | 2.2201x |
 | Products，L2，32T | 权威TFS / 完整候选 | 1.161x |
 | Products，L3，32T | 权威TFS / 完整候选 | 1.046x |
 | native连续logits，D=2983，32T | PyTorch BF16 producer / AMX producer | 2.516x |
@@ -272,6 +301,22 @@ FP32 oracle显示该路径保持FP32 accumulator；它与PyTorch BF16-output的�
 - dH relative L2：约`0.0026%--0.0127%`，视对照路径而定；
 - dW relative L2：约`0.000011%--0.219%`；
 - db最大绝对误差：约`2.2e-6--3.62e-6`。
+
+2026-09-10显式planner复验对应Slurm job `10387552`：权威中位数
+`1310.390 ms`，planner中位数`590.243 ms`，比值`2.2201x`；loss绝对误差
+`0`，dH relative L2为`8.70e-5`，dW relative L2为`3.85e-7`，db最大绝对
+误差`3.37e-6`。构建job `10387317`成功，扩展SHA-256为
+`79385b1cee4b624264f906b4882d353b2b3c1dcb3b485c0e2990af39bdfdc402`；
+planner/native/scope gate job `10387533`为`13 passed`。
+收紧未测hidden-width与低线程fallback后的最终job `10388041`为`15 passed`。
+
+完整24-cell同节点矩阵（Products与IGB-small D=2983，L2/L3，
+1/2/4/8/16/32T）全部通过；四组几何均值依次为`1.2765x`、`1.0850x`、
+`2.2406x`、`2.0329x`，全24-cell几何均值`1.5848x`。两组200-epoch
+paired收敛检查也通过：Products L2 32T为`1.1375x`，IGB-small D=2983
+L2 32T为`2.3268x`；最终验证/测试准确率绝对差均不超过`1.41e-4`。
+
+详见`docs/PLANNED_SHADOW_ACCEPTANCE_20260910.md`及`evidence/`。
 
 已知边界：
 
@@ -287,6 +332,7 @@ FP32 oracle显示该路径保持FP32 accumulator；它与PyTorch BF16-output的�
 - `docs/SUPERVISION_SCOPED_TFS_RESEARCH_20260905.md`
 - `docs/BOUNDED_PANEL_TERMINAL_CE_20260906.md`
 - `docs/SUPERVISION_SCOPED_DENSE_FUSION_RESULTS_20260906.md`
+- `docs/PLANNED_SHADOW_ACCEPTANCE_20260910.md`
 
 ## 5. 尚未完成或没有进入源码的设计
 

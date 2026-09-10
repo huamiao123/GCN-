@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 
 from .native import backend
+from .supervision_dense_plan import DenseFusionPlan
 
 
 def _edge_balanced_cuts(rowptr: torch.Tensor, threads: int) -> torch.Tensor:
@@ -168,7 +169,9 @@ class _ScopedTerminalCrossEntropyFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, hidden, weight, bias, rowptr, colidx, scale, row_ids,
                 transpose_rowptr, transpose_colidx, selected_schedule,
-                transpose_schedule, compact_labels, threads, row_tile):
+                transpose_schedule, compact_labels, threads, row_tile,
+                fused_db, logsoftmax_out, native_dw,
+                direct_tail_transpose, native_logits):
         threads = int(threads)
         row_tile = int(row_tile)
         if row_tile <= 0:
@@ -188,20 +191,24 @@ class _ScopedTerminalCrossEntropyFunction(torch.autograd.Function):
         db = torch.zeros_like(bias, dtype=torch.float32)
         total_loss = torch.zeros((), dtype=torch.float64)
         inv_rows = 1.0 / float(rows)
-        fused_db = os.environ.get("TFS_SCOPE_FUSED_DB", "0") == "1"
+        fused_db = bool(fused_db)
+        logsoftmax_out = bool(logsoftmax_out)
+        native_dw = bool(native_dw)
+        direct_tail_transpose = bool(direct_tail_transpose)
+        native_logits = bool(native_logits)
 
         for r0 in range(0, rows, row_tile):
             r1 = min(rows, r0 + row_tile)
             pp = pulled[r0:r1]
             yy = compact_labels[r0:r1]
             panel_scale = selected_scale[r0:r1].contiguous()
-            if os.environ.get("TFS_SCOPE_NATIVE_LOGITS", "0") == "1":
+            if native_logits:
                 logits = backend().c3_compact_logits_amx_shadow_v1(
                     pp.contiguous(), weight_bf16, bias, panel_scale, threads)
             else:
                 logits = torch.matmul(pp, weight_bf16).float()
                 logits.mul_(panel_scale.unsqueeze(1)).add_(bias)
-            if os.environ.get("TFS_SCOPE_LOGSOFTMAX_OUT", "0") == "1":
+            if logsoftmax_out:
                 torch.log_softmax(logits, dim=1, out=logits)
                 target = logits.gather(1, yy.unsqueeze(1)).squeeze(1)
                 total_loss.add_(-target.double().sum())
@@ -220,9 +227,9 @@ class _ScopedTerminalCrossEntropyFunction(torch.autograd.Function):
                 db.add_(logits.sum(dim=0))
                 gs = backend().c3_scale_grad_bf16_v1(
                     logits, panel_scale, threads)
-            if os.environ.get("TFS_SCOPE_NATIVE_DW", "0") == "1":
-                panel_dw = backend().c3_compact_dw_bf16_amx_shadow_v1(
-                    pp.contiguous(), gs, threads)
+            if native_dw:
+                panel_dw = backend().c3_compact_dw_bf16_amx_shadow_v2(
+                    pp.contiguous(), gs, threads, direct_tail_transpose)
             else:
                 panel_dw = torch.matmul(
                     pp.transpose(0, 1).contiguous(), gs).float()
@@ -247,7 +254,7 @@ class _ScopedTerminalCrossEntropyFunction(torch.autograd.Function):
             dw = dw * factor
             db = db * factor
         return (dh, dw, db, None, None, None, None, None, None, None,
-                None, None, None, None)
+                None, None, None, None, None, None, None, None, None)
 
 
 def terminal_logits(hidden: torch.Tensor, terminal_conv, graph,
@@ -275,31 +282,57 @@ def train_logits(model, x: torch.Tensor, graph,
 
 def terminal_cross_entropy(hidden: torch.Tensor, terminal_conv, graph,
                            scope: SupervisionScope, labels: torch.Tensor,
-                           row_tile: Optional[int] = None) -> torch.Tensor:
+                           row_tile: Optional[int] = None,
+                           dense_plan: Optional[DenseFusionPlan] = None
+                           ) -> torch.Tensor:
     """Return exact mean CE without a persistent selected_rows x D tensor."""
     if hidden.shape[0] != scope.node_count:
         raise ValueError("hidden row count does not match supervision scope")
-    if row_tile is None:
-        row_tile = int(os.environ.get("TFS_SCOPE_LOSS_ROW_TILE", "300000"))
+    if dense_plan is not None:
+        dense_plan.validate(
+            scope.selected_count, int(hidden.shape[1]),
+            int(terminal_conv.weight.shape[1]), int(terminal_conv.threads))
+        if row_tile is not None and int(row_tile) != dense_plan.row_tile:
+            raise ValueError("row_tile conflicts with the explicit dense plan")
+        row_tile = dense_plan.row_tile
+        fused_db = dense_plan.fused_db
+        logsoftmax_out = dense_plan.logsoftmax_out
+        native_dw = dense_plan.native_dw
+        direct_tail = dense_plan.direct_tail_transpose
+        native_logits = dense_plan.native_logits
+    else:
+        if row_tile is None:
+            row_tile = int(os.environ.get(
+                "TFS_SCOPE_LOSS_ROW_TILE", "300000"))
+        fused_db = os.environ.get("TFS_SCOPE_FUSED_DB", "0") == "1"
+        logsoftmax_out = (
+            os.environ.get("TFS_SCOPE_LOGSOFTMAX_OUT", "0") == "1")
+        native_dw = os.environ.get("TFS_SCOPE_NATIVE_DW", "0") == "1"
+        direct_tail = os.environ.get("TFS_COMPACT_DW_T4", "0") == "1"
+        native_logits = (
+            os.environ.get("TFS_SCOPE_NATIVE_LOGITS", "0") == "1")
     compact_labels = labels.index_select(0, scope.row_ids).contiguous()
     return _ScopedTerminalCrossEntropyFunction.apply(
         hidden, terminal_conv.weight, terminal_conv.bias,
         graph.rowptr, graph.colidx, graph.scale, scope.row_ids,
         scope.transpose_rowptr, scope.transpose_colidx,
         scope.selected_schedule, scope.transpose_schedule, compact_labels,
-        terminal_conv.threads, int(row_tile))
+        terminal_conv.threads, int(row_tile), fused_db, logsoftmax_out,
+        native_dw, direct_tail, native_logits)
 
 
 def train_cross_entropy(model, x: torch.Tensor, labels: torch.Tensor, graph,
                         scope: SupervisionScope,
-                        row_tile: Optional[int] = None) -> torch.Tensor:
+                        row_tile: Optional[int] = None,
+                        dense_plan: Optional[DenseFusionPlan] = None
+                        ) -> torch.Tensor:
     """Run hidden layers and the bounded-panel terminal CE dataflow."""
     hidden = x
     for conv in model.convs[:-1]:
         hidden = F.dropout(F.relu(conv(hidden, graph)), p=model.dropout,
                            training=model.training)
     return terminal_cross_entropy(
-        hidden, model.convs[-1], graph, scope, labels, row_tile)
+        hidden, model.convs[-1], graph, scope, labels, row_tile, dense_plan)
 
 
 __all__ = [

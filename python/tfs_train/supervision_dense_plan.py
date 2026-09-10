@@ -12,10 +12,27 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class DenseFusionPlan:
+    selected_rows: int
+    hidden_dim: int
+    output_dim: int
+    threads: int
+    row_tile: int
+    fused_db: bool
+    logsoftmax_out: bool
     native_dw: bool
     direct_tail_transpose: bool
     native_logits: bool
     rationale: tuple[str, ...]
+
+    def validate(self, selected_rows: int, hidden_dim: int,
+                 output_dim: int, threads: int) -> None:
+        actual = (selected_rows, hidden_dim, output_dim, threads)
+        expected = (self.selected_rows, self.hidden_dim,
+                    self.output_dim, self.threads)
+        if actual != expected:
+            raise ValueError(
+                "dense plan shape mismatch: "
+                f"planned={expected}, actual={actual}")
 
 
 def plan_supervision_dense(selected_rows: int, hidden_dim: int,
@@ -34,8 +51,10 @@ def plan_supervision_dense(selected_rows: int, hidden_dim: int,
         raise ValueError("shadow dense kernels support at most 32 threads")
 
     rationale = []
+    row_tile = min(selected_rows, 300_000)
+    logsoftmax_out = True
     native_dw = (
-        hidden_dim <= 128 and threads >= 8 and output_dim >= 512 and
+        hidden_dim == 128 and threads >= 8 and output_dim >= 512 and
         selected_rows / output_dim >= 20.0)
     if native_dw:
         rationale.append("compact dW amortizes transpose/reduction")
@@ -48,15 +67,25 @@ def plan_supervision_dense(selected_rows: int, hidden_dim: int,
 
     work_per_thread = selected_rows * output_dim / threads
     native_logits = (
-        hidden_dim <= 128 and output_dim >= 2500 and
+        hidden_dim == 128 and threads >= 8 and output_dim >= 2500 and
         work_per_thread >= 500_000)
     if native_logits:
         rationale.append("high-D fused logits exceeds end-to-end crossover")
     else:
         rationale.append("framework logits retained below high-D crossover")
 
-    return DenseFusionPlan(native_dw, direct_tail, native_logits,
-                           tuple(rationale))
+    # The fused reduction removes a separate MxD gradient scan, but its
+    # chunk-local accumulator is only enabled in the same measured region as
+    # compact dW.  Outside that envelope the framework reduction is retained.
+    fused_db = native_dw
+    if fused_db:
+        rationale.append("tile-local db removes a separate gradient scan")
+    rationale.append(f"bounded exact CE uses row_tile={row_tile}")
+
+    return DenseFusionPlan(
+        selected_rows, hidden_dim, output_dim, threads, row_tile,
+        fused_db, logsoftmax_out, native_dw, direct_tail, native_logits,
+        tuple(rationale))
 
 
 __all__ = ["DenseFusionPlan", "plan_supervision_dense"]

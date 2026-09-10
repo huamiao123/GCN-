@@ -23,7 +23,8 @@ def use_native(enabled):
         os.environ["TFS_SCOPE_NATIVE_DW"] = "1" if enabled else "0"
         os.environ["TFS_SCOPE_NATIVE_LOGITS"] = "0"
     elif kind == "logits":
-        os.environ["TFS_SCOPE_NATIVE_DW"] = "1"
+        os.environ["TFS_SCOPE_NATIVE_DW"] = os.environ.get(
+            "SCOPE_NATIVE_DW_WITH_LOGITS", "1")
         os.environ["TFS_SCOPE_NATIVE_LOGITS"] = "1" if enabled else "0"
     else:
         raise ValueError("SCOPE_AB_KIND must be dw or logits")

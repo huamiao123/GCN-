@@ -2688,9 +2688,9 @@ std::vector<at::Tensor> c3_scale_grad_bf16_db_v2(
 // Reuse the established AMX dW microkernel, but keep every required layout
 // conversion, thread-local accumulator, deterministic reduction, and final
 // KxD scatter inside this call so an A/B against framework matmul is honest.
-at::Tensor c3_compact_dw_bf16_amx_shadow_v1(
+static at::Tensor c3_compact_dw_bf16_amx_shadow_impl(
     const at::Tensor& pulled_in, const at::Tensor& gs_in,
-    int64_t threads64) {
+    int64_t threads64, bool direct_tail_transpose) {
   const double profile_t0=now_ms();
   auto pulled=pulled_in.contiguous(),gs=gs_in.contiguous();
   TORCH_CHECK(pulled.device().is_cpu() && gs.device().is_cpu() &&
@@ -2709,7 +2709,6 @@ at::Tensor c3_compact_dw_bf16_amx_shadow_v1(
               "compact-dW shadow shape unsupported");
   const int panel=512,dp=round_up(d,32),kp=round_up(k,64);
   const int panel_count=(m+panel-1)/panel;
-  const bool direct_tail_transpose=experiment_flag("TFS_COMPACT_DW_T4");
   const bf16* pp=reinterpret_cast<const bf16*>(
       pulled.data_ptr<at::BFloat16>());
   const bf16* gp=reinterpret_cast<const bf16*>(
@@ -2805,6 +2804,22 @@ at::Tensor c3_compact_dw_bf16_amx_shadow_v1(
       <<",total_ms="<<(profile_end-profile_t0)<<std::endl;
   }
   return dw;
+}
+
+// v1 retains the environment-controlled experiment contract so all collected
+// results remain reproducible.  Planner-driven code must use v2 instead.
+at::Tensor c3_compact_dw_bf16_amx_shadow_v1(
+    const at::Tensor& pulled_in, const at::Tensor& gs_in,
+    int64_t threads64) {
+  return c3_compact_dw_bf16_amx_shadow_impl(
+      pulled_in,gs_in,threads64,experiment_flag("TFS_COMPACT_DW_T4"));
+}
+
+at::Tensor c3_compact_dw_bf16_amx_shadow_v2(
+    const at::Tensor& pulled_in, const at::Tensor& gs_in,
+    int64_t threads64, bool direct_tail_transpose) {
+  return c3_compact_dw_bf16_amx_shadow_impl(
+      pulled_in,gs_in,threads64,direct_tail_transpose);
 }
 
 // Shadow-only compact terminal GEMM.  This is the established high-D AMX
