@@ -1,0 +1,13 @@
+dataset,input_dim,output_dim,threads,memory_binding,aggregate_ms,transform_ms,fused_ms,strongest_path,strongest_ms,fused_speedup_vs_strongest,fused_slowdown_vs_strongest
+ogbn-arxiv,128,40,1,numa0,104.12,59.96,96.35,transform,59.96,0.622,1.607
+ogbn-arxiv,128,40,2,numa0,52.69,30.36,50.64,transform,30.36,0.600,1.668
+ogbn-arxiv,128,40,4,numa0,26.34,15.39,28.01,transform,15.39,0.549,1.820
+ogbn-arxiv,128,40,8,numa0,13.27,7.79,16.17,transform,7.79,0.482,2.076
+ogbn-arxiv,128,40,16,socket0_interleave_numa0_1,5.67,3.72,9.75,transform,3.72,0.381,2.621
+ogbn-arxiv,128,40,32,socket0_interleave_numa0_3,2.98,2.48,7.24,transform,2.48,0.342,2.919
+ogbn-arxiv,128,128,1,numa0,126.57,134.86,196.87,aggregate,126.57,0.643,1.555
+ogbn-arxiv,128,128,2,numa0,63.64,66.86,103.00,aggregate,63.64,0.618,1.618
+ogbn-arxiv,128,128,4,numa0,31.89,33.47,54.12,aggregate,31.89,0.589,1.697
+ogbn-arxiv,128,128,8,numa0,16.07,17.53,32.21,aggregate,16.07,0.499,2.004
+ogbn-arxiv,128,128,16,socket0_interleave_numa0_1,7.27,8.03,19.87,aggregate,7.27,0.366,2.733
+ogbn-arxiv,128,128,32,socket0_interleave_numa0_3,4.15,5.18,15.25,aggregate,4.15,0.272,3.675

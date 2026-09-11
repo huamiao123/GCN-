@@ -1,3 +1,6 @@
 # Slurm and Linux shells reject CRLF batch scripts. Keep executable shell
 # sources canonical in the repository regardless of the contributor OS.
 *.sh text eol=lf
+
+# Preserve byte-identical historical C++ snapshots referenced by SHA-256 manifests.
+experiments/original_tfs_shw_training/*.cpp -text

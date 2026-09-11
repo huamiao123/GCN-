@@ -1,5 +1,7 @@
 # TFS-Train：数据流修复与两级 Panel 研究版（2026-09-11）
 
+> 原始 TFS 推理 `SHW` 融合、degree sort 和 AMX tile 数据流向完整归一化 GCN 训练迁移的全面实验档案，见 [`docs/ORIGINAL_TFS_SHW_TRAINING_EXPERIMENTS_20260911.md`](docs/ORIGINAL_TFS_SHW_TRAINING_EXPERIMENTS_20260911.md)。配套源码快照和原始证据分别位于 [`experiments/original_tfs_shw_training/`](experiments/original_tfs_shw_training/) 与 [`evidence/original_tfs_shw_training/`](evidence/original_tfs_shw_training/)。
+
 本分支是以 `final_pre_numa` 权威实现为基础完成的独立修复与数据流研究快照，目标是
 面向 Intel AMX CPU 的 full-batch GCN 训练，减少 sparse/dense 边界上的重复扫描、
 全局中间张量和无效数据搬运。

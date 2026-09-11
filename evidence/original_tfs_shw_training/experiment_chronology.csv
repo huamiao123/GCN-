@@ -1,0 +1,21 @@
+job_id,tag,node_class,status,purpose,result,eligibility
+9959539,forward_fused_smoke_20260810_v1,shared,FAILED_BUILD,first exact-normalized fused build,AMX tile IDs were not compile-time literals,NO
+9959543,forward_fused_smoke_20260810_v2,shared,FAILED_FIXTURE,rerun after build repair,val_mask versus valid_mask fixture error,NO
+9959545,forward_fused_smoke_20260810_v3,shared,PASS,first correctness and timing smoke,correctness about 5e-7 rel-L2; fused lost to strongest,diagnostic
+9959552,forward_fused_smoke_20260810_v4,shared,FAILED_RUNTIME,D40 8-column AMX tail,illegal instruction; variant rejected,NO
+9959554,forward_fused_smoke_20260810_v5,shared,PASS,persistent workspace and safe D40 three-tile path,allocation excluded as root cause; fused still lost,diagnostic
+9959556,forward_fused_r_sweep_20260810_v1,shared,PASS,row-group sweep R=16..512,best R=32 D40 and R=16 D128; fused still lost,diagnostic
+9959563,forward_fused_formal_20260810_v1,exclusive,PARTIALLY_INVALID,first formal thread matrix,16T and 32T oversubscribed NUMA0 cpuset; those cells rejected,partial
+9959570,forward_fused_formal_20260810_v2,exclusive,PASS,topology-correct 1/2/4/8/16/32T matrix,fused lost all 12 shape-thread cells,formal_negative
+9959582,hybrid_fullstep_smoke_20260810_v1,shared,PASS,layer-adaptive two-layer training smoke,correctness pass but legacy runtime slow,diagnostic
+9959598,hybrid_fullstep_formal_20260810_v1,exclusive,PASS,initial full-step thread matrix,negative scaling exposed,development
+9959620,hybrid_threadfix_smoke_20260810_v1,exclusive,PASS,remove hot-path set_num_threads,no material improvement,diagnostic
+9959627,hybrid_schedule_smoke_20260810_v1,exclusive,PASS,dynamic-64 scheduling,1.64x/1.69x improvement at 8T/32T but still slow,diagnostic
+9959653,hybrid_nnz_balanced_smoke,exclusive,PASS,contiguous NNZ-balanced row ownership,additional 1.105x/1.088x improvement; 1.81x/1.89x over initial degree-static,diagnostic
+9959660,hybrid_fullstep_best_legacy,exclusive,PASS,best legacy full-step matrix,1T wins but 4T+ loses; legacy C3 rejected as final,development
+9959733,hybrid_amx_v2_backward_smoke,exclusive,PASS,integrate frozen AMX-v2 backward,correct but full step still dominated by forward/staging,diagnostic
+9959788,hybrid_online_bf16_amx_smoke,exclusive,PASS,online BF16/AMX forward plus AMX-v2 backward,small improvement but still negative,diagnostic
+9960039,hybrid_online_amx_matrix,exclusive,PASS,48-process development matrix,1T wins; 4T+ loses due runtime integration,development
+9960379,hybrid_onemkl_forward_v4,exclusive,FAILED_BUILD,replace PyTorch BF16 matmul with oneMKL,compile failure,NO
+9960380,hybrid_onemkl_forward_v5,exclusive,PASS_REJECTED,direct per-call oneMKL integration,regressed from v3 and was rejected,diagnostic_negative
+9963827,dual_track_forward_replay_v4,exclusive,PASS,independent D128 fused replay confirmation,legacy fused 1.553x/1.988x/3.765x slower at 1/8/32T,formal_negative

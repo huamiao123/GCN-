@@ -1,0 +1,4 @@
+dataset,input_dim,output_dim,threads,aggregate_ms,transform_ms,legacy_fused_ms,r4_c4_avx_ms,r4_c6_kblock_ms,strongest_ms,legacy_fused_slowdown
+ogbn-arxiv,128,128,1,126.504,134.832,196.462,220.949,221.952,126.504,1.553
+ogbn-arxiv,128,128,8,16.002,17.240,31.808,38.399,35.017,16.002,1.988
+ogbn-arxiv,128,128,32,4.078,5.215,15.353,19.165,19.317,4.078,3.765
