@@ -68,10 +68,16 @@ def main():
     assert _empty.numel() == 0 and meta.tolist() == [threads, 512, 64, 64]
 
     gs = gs.contiguous()
-    dp = torch.matmul(gs, weight.to(torch.bfloat16).transpose(0, 1)).float()
-    dx_ref = backend().c3_pull_only_amx_v1(
-        dp, rowptr, colidx, threads
-    ) * scale.unsqueeze(1)
+    dp = torch.matmul(gs, weight.to(torch.bfloat16).transpose(0, 1))
+    assert dp.dtype == torch.bfloat16
+    dh_bf16 = backend().c3_pull_only_bf16_amx_v1(
+        dp, rowptr, colidx, threads)
+    # Prove that removing the full dP BF16->FP32->BF16 round trip preserves
+    # the exact historical sparse-pull result.
+    dh_historical = backend().c3_pull_only_amx_v1(
+        dp.float(), rowptr, colidx, threads)
+    torch.testing.assert_close(dh_bf16.float(), dh_historical, rtol=0, atol=0)
+    dx_ref = dh_bf16 * scale.unsqueeze(1)
     dx, dw2, db2, _ = backend().c3_backward_aggregate_saved_amx_v4(
         grad, pulled, weight, rowptr, colidx, scale, threads, True
     )

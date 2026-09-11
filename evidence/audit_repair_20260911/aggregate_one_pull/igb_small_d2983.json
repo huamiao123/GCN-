@@ -1,0 +1,97 @@
+{
+  "status": "pass",
+  "candidate": "aggregate_highd_one_final_pull",
+  "graph_kind": "training_csr",
+  "csr_path": "/home/huangjianqiang_group/hdacp1/data/wzh/datasets/igb_homogeneous_small/small/processed/tfs_graph_csr_v1.pt",
+  "nodes": 1000000,
+  "nnz": 12068130,
+  "average_degree": 12.06813,
+  "k": 128,
+  "d": 2983,
+  "threads": 32,
+  "d_tile": 257,
+  "d_slabs": [
+    [
+      0,
+      249
+    ],
+    [
+      249,
+      498
+    ],
+    [
+      498,
+      747
+    ],
+    [
+      747,
+      996
+    ],
+    [
+      996,
+      1245
+    ],
+    [
+      1245,
+      1494
+    ],
+    [
+      1494,
+      1743
+    ],
+    [
+      1743,
+      1991
+    ],
+    [
+      1991,
+      2239
+    ],
+    [
+      2239,
+      2487
+    ],
+    [
+      2487,
+      2735
+    ],
+    [
+      2735,
+      2983
+    ]
+  ],
+  "csr_scans_baseline": 12,
+  "csr_scans_candidate": 1,
+  "baseline": {
+    "median_ms": 2403.6213997751474,
+    "mean_ms": 2405.998422577977,
+    "min_ms": 2385.366151109338,
+    "max_ms": 2429.621174931526,
+    "samples_ms": [
+      2387.0508819818497,
+      2385.366151109338,
+      2424.332505092025,
+      2403.6213997751474,
+      2429.621174931526
+    ]
+  },
+  "candidate_result": {
+    "median_ms": 743.7607608735561,
+    "mean_ms": 744.4504532963037,
+    "min_ms": 736.1168619245291,
+    "max_ms": 758.5272081196308,
+    "samples_ms": [
+      736.1168619245291,
+      736.5092914551497,
+      743.7607608735561,
+      758.5272081196308,
+      747.3381441086531
+    ]
+  },
+  "median_speedup": 3.2317131075213816,
+  "correctness": {
+    "dx_relative_l2": 0.0032181383576244116,
+    "dx_max_abs": 0.9375,
+    "dw_db_exact": true
+  }
+}

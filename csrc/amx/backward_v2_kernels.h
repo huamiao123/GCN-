@@ -31,6 +31,16 @@ void amx_gemm_4c_epilogue(const bf16* a, int rows_padded,
                           int logical_output, const float* scale,
                           const float* bias, float* c);
 
+// Pointer sibling for callers that keep packed weights in an explicit tensor
+// across several row panels.  The layout is identical to packed_b above.
+void amx_gemm_4c_epilogue_packed(const bf16* a, int rows_padded,
+                                 int reduction_padded,
+                                 const bf16* packed_b,
+                                 int output_padded, int output_stride,
+                                 int global_row0, int valid_rows,
+                                 int logical_output, const float* scale,
+                                 const float* bias, float* c);
+
 void dw_naive_baseline(const bf16* ybar_t, int d_padded, int rows_padded,
                        const std::vector<bf16>& packed_h, int k_padded,
                        float* local_dwt);

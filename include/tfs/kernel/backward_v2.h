@@ -70,7 +70,8 @@ void transpose_y_block_to_panel_t3(const bf16* y_block, int rows_padded,
 // instead of rereading the complete row-major block.  ``db_local`` may be
 // null when the caller does not need a bias-gradient accumulation.
 void scale_bf16_db_transpose_t3(const float* grad, const float* scale,
-                                int global_row0, int valid_rows, int d,
+                                int global_row0, int valid_rows,
+                                int grad_row_stride, int d,
                                 int d_padded, int panel_stride,
                                 int panel_row_offset, bf16* y_rowmajor,
                                 bf16* y_t_panel, float* db_local);
@@ -90,7 +91,8 @@ void dh_amx_4c2a2b(const bf16* ybar, int rows_padded, int valid_rows,
                    int d_padded, const bf16* packed_wt, int logical_k,
                    int k_padded,
                    float* dh, int global_row0, const float* target_scale,
-                   bool double_buffer, KernelCounters* counters);
+                   bool double_buffer, KernelCounters* counters,
+                   bool accumulate = false);
 
 // BF16-output sibling used by the High-D Q-first path.  The AMX accumulator
 // is rounded once at the dense-to-sparse boundary, avoiding an N×K FP32

@@ -8,7 +8,7 @@ evaluation remain unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from typing import Optional
 
@@ -67,6 +67,11 @@ class SupervisionScope:
     transpose_schedule: torch.Tensor
     node_count: int
     selected_edge_count: int
+    thread_count: int
+    _graph_rowptr: torch.Tensor = field(repr=False, compare=False)
+    _graph_colidx: torch.Tensor = field(repr=False, compare=False)
+    _rowptr_version: int = field(repr=False, compare=False)
+    _colidx_version: int = field(repr=False, compare=False)
 
     @property
     def selected_count(self) -> int:
@@ -75,6 +80,24 @@ class SupervisionScope:
     @property
     def selected_ratio(self) -> float:
         return self.selected_count / self.node_count
+
+    def validate(self, graph, threads: int) -> None:
+        """Reject reuse with a different or mutated graph/runtime contract."""
+        if int(threads) != self.thread_count:
+            raise ValueError(
+                "supervision scope thread mismatch: "
+                f"built={self.thread_count}, actual={int(threads)}")
+        if int(graph.rowptr.numel()) != self.node_count + 1:
+            raise ValueError("graph node count does not match supervision scope")
+        if (graph.rowptr._cdata != self._graph_rowptr._cdata or
+                graph.colidx._cdata != self._graph_colidx._cdata):
+            raise ValueError(
+                "supervision scope belongs to a different graph; rebuild it")
+        if (int(graph.rowptr._version) != self._rowptr_version or
+                int(graph.colidx._version) != self._colidx_version):
+            raise ValueError(
+                "graph CSR changed after supervision scope construction; "
+                "rebuild the scope")
 
     @classmethod
     def build(cls, train_mask: torch.Tensor, graph, threads: int):
@@ -90,9 +113,12 @@ class SupervisionScope:
         selected_schedule = _selected_cuts(row_ids, graph.rowptr, threads)
         transpose_schedule = _edge_balanced_cuts(transpose_rowptr, threads)
         selected_edges = int(transpose_colidx.numel())
-        return cls(row_ids, transpose_rowptr, transpose_colidx,
-                   selected_schedule, transpose_schedule,
-                   int(train_mask.numel()), selected_edges)
+        return cls(
+            row_ids, transpose_rowptr, transpose_colidx,
+            selected_schedule, transpose_schedule,
+            int(train_mask.numel()), selected_edges, int(threads),
+            graph.rowptr, graph.colidx, int(graph.rowptr._version),
+            int(graph.colidx._version))
 
 
 class _ScopedTerminalFunction(torch.autograd.Function):
@@ -196,6 +222,14 @@ class _ScopedTerminalCrossEntropyFunction(torch.autograd.Function):
         native_dw = bool(native_dw)
         direct_tail_transpose = bool(direct_tail_transpose)
         native_logits = bool(native_logits)
+        packed_logits_weight = None
+        if native_logits and rows > row_tile:
+            # W is constant for every row panel in this autograd invocation.
+            # Pack it once here; the next optimizer step constructs a new
+            # BF16 weight and therefore cannot accidentally reuse stale data.
+            packed_logits_weight = (
+                backend().c3_pack_compact_logits_weight_amx_shadow_v1(
+                    weight_bf16))
 
         for r0 in range(0, rows, row_tile):
             r1 = min(rows, r0 + row_tile)
@@ -203,8 +237,14 @@ class _ScopedTerminalCrossEntropyFunction(torch.autograd.Function):
             yy = compact_labels[r0:r1]
             panel_scale = selected_scale[r0:r1].contiguous()
             if native_logits:
-                logits = backend().c3_compact_logits_amx_shadow_v1(
-                    pp.contiguous(), weight_bf16, bias, panel_scale, threads)
+                if packed_logits_weight is None:
+                    logits = backend().c3_compact_logits_amx_shadow_v1(
+                        pp.contiguous(), weight_bf16, bias, panel_scale,
+                        threads)
+                else:
+                    logits = backend().c3_compact_logits_packed_amx_shadow_v2(
+                        pp.contiguous(), packed_logits_weight, bias,
+                        panel_scale, int(weight.shape[1]), threads)
             else:
                 logits = torch.matmul(pp, weight_bf16).float()
                 logits.mul_(panel_scale.unsqueeze(1)).add_(bias)
@@ -262,6 +302,7 @@ def terminal_logits(hidden: torch.Tensor, terminal_conv, graph,
     """Return logits only for the scope rows, in ``scope.row_ids`` order."""
     if hidden.shape[0] != scope.node_count:
         raise ValueError("hidden row count does not match supervision scope")
+    scope.validate(graph, terminal_conv.threads)
     return _ScopedTerminalFunction.apply(
         hidden, terminal_conv.weight, terminal_conv.bias,
         graph.rowptr, graph.colidx, graph.scale, scope.row_ids,
@@ -288,6 +329,7 @@ def terminal_cross_entropy(hidden: torch.Tensor, terminal_conv, graph,
     """Return exact mean CE without a persistent selected_rows x D tensor."""
     if hidden.shape[0] != scope.node_count:
         raise ValueError("hidden row count does not match supervision scope")
+    scope.validate(graph, terminal_conv.threads)
     if dense_plan is not None:
         dense_plan.validate(
             scope.selected_count, int(hidden.shape[1]),

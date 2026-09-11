@@ -475,9 +475,9 @@ def native_transform_highd_backward(
           if compute_dx else None)
     for d0, d1 in ranges:
         part_dx, part_dw, _part_db, _meta = native(
-            grad.narrow(1, d0, d1 - d0).contiguous(),
+            grad.narrow(1, d0, d1 - d0),
             hs_bf16,
-            weight.narrow(1, d0, d1 - d0).contiguous(),
+            weight.narrow(1, d0, d1 - d0),
             rowptr,
             colidx,
             scale,
@@ -797,8 +797,8 @@ def native_aggregate_d_slab_backward(
           if compute_dx else None)
     for d0, d1 in ranges:
         part_dx, part_dw, part_db, _ = native(
-            grad.narrow(1, d0, d1 - d0).contiguous(), pulled,
-            weight.narrow(1, d0, d1 - d0).contiguous(), rowptr, colidx,
+            grad.narrow(1, d0, d1 - d0), pulled,
+            weight.narrow(1, d0, d1 - d0), rowptr, colidx,
             scale, int(threads), compute_dx)
         if compute_dx:
             dx.add_(part_dx)
@@ -818,15 +818,15 @@ def streamed_aggregate_single_scan_backward(
     compute_dx: bool,
     *,
     plan: Optional[HighDBackwardPlan] = None,
-) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
-    """Aggregate High-D d-slab stream with one final CSR pull.
+) -> Tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
+    """Native aggregate D-slab execution with one final CSR pull.
 
-    The regular native d-slab adapter invokes the C++ full-D entry once per
-    output slab, which repeats the CSR pull used to form dX.  This candidate
-    keeps an FP32 ``dP`` accumulator while visiting the D slabs and calls the
-    established pull-only primitive exactly once.  Because the accumulator
-    is N*K, it is guarded by the same explicit High-D budget and is never an
-    implicit replacement for the bounded native adapter.
+    Each native slab accumulates its AMX FP32 dP directly into one caller-
+    owned [N,Kp] buffer without traversing CSR or returning an N*K partial.
+    Python rounds once at the final dense/sparse boundary and invokes one
+    scaled BF16 pull.  dW/db remain native per-slab results.  Because the dP
+    accumulator is N*Kp, the immutable execution-plan budget remains a hard
+    gate.
     """
 
     if plan is None:
@@ -834,13 +834,11 @@ def streamed_aggregate_single_scan_backward(
             int(pulled.shape[0]), int(pulled.shape[1]), int(weight.shape[1]),
             int(threads), bool(compute_dx))
     n, k = map(int, pulled.shape)
+    wk, d = map(int, weight.shape)
+    if wk != k or tuple(grad.shape) != (n, d):
+        raise ValueError("aggregate single-scan shape mismatch")
     if not compute_dx:
-        # Without dX there is no sparse pull to deduplicate; retain the
-        # ordinary stream so dW numerical behavior is unchanged.
-        dx, dw, _ = streamed_aggregate_backward(
-            pulled, weight, grad, scale, rowptr, colidx, threads,
-            compute_dx, plan=plan)
-        return dx, dw
+        raise ValueError("aggregate single-scan is useful only when dX is required")
     kp = _round_up(k, 64)
     # Do not re-resolve a possibly different environment budget after the
     # canonical planner selected this branch.  Direct callers without a plan
@@ -856,10 +854,33 @@ def streamed_aggregate_single_scan_backward(
         raise RuntimeError(
             "aggregate single-scan dP accumulator exceeds the configured "
             "High-D workspace budget")
-    dx, dw, _ = streamed_aggregate_backward(
-        pulled, weight, grad, scale, rowptr, colidx, threads,
-        compute_dx, plan=plan)
-    return dx, dw
+    native = getattr(
+        backend(), "c3_backward_aggregate_highd_dp_amx_v1", None)
+    pull = getattr(
+        backend(), "c3_pull_only_bf16_scaled_fp32_amx_v1", None)
+    if native is None or pull is None:
+        raise RuntimeError("native aggregate single-scan symbols are unavailable")
+    ranges = (tuple((int(d0), int(d1)) for d0, d1 in plan.d_slabs)
+              if plan.d_slabs else
+              tuple((d0, min(d, d0 + int(plan.d_tile)))
+                    for d0 in range(0, d, int(plan.d_tile))))
+    if not ranges or ranges[0][0] != 0 or ranges[-1][1] != d:
+        raise ValueError("aggregate single-scan slabs must cover D exactly")
+
+    d_p = torch.zeros((n, kp), dtype=torch.float32, device=grad.device)
+    dw = torch.empty((k, d), dtype=torch.float32, device=grad.device)
+    db = torch.empty((d,), dtype=torch.float32, device=grad.device)
+    for d0, d1 in ranges:
+        _dp_alias, partial_dw, partial_db, _ = native(
+            grad.narrow(1, d0, d1 - d0), pulled,
+            weight.narrow(1, d0, d1 - d0), rowptr, colidx, scale,
+            d_p, int(threads))
+        dw.narrow(1, d0, d1 - d0).copy_(partial_dw)
+        db.narrow(0, d0, d1 - d0).copy_(partial_db)
+    pull_input = d_p if kp == k else d_p.narrow(1, 0, k).contiguous()
+    dx = pull(pull_input.to(torch.bfloat16), rowptr, colidx, scale,
+              int(threads))
+    return dx, dw, db
 
 
 __all__ = [

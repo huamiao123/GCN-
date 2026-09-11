@@ -26,6 +26,10 @@ std::vector<at::Tensor> c3_scale_grad_bf16_db_v2(const at::Tensor&,const at::Ten
 at::Tensor c3_compact_dw_bf16_amx_shadow_v1(const at::Tensor&,const at::Tensor&,int64_t);
 at::Tensor c3_compact_dw_bf16_amx_shadow_v2(const at::Tensor&,const at::Tensor&,int64_t,bool);
 at::Tensor c3_compact_logits_amx_shadow_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t);
+at::Tensor c3_pack_compact_logits_weight_amx_shadow_v1(const at::Tensor&);
+at::Tensor c3_compact_logits_packed_amx_shadow_v2(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t,int64_t);
+at::Tensor c3_pack_compact_q_weight_amx_shadow_v1(const at::Tensor&);
+at::Tensor c3_compact_q_packed_bf16_amx_shadow_v1(const at::Tensor&,const at::Tensor&,int64_t,int64_t);
 std::vector<at::Tensor> c3_forward_wide_amx_v3(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t);
 std::vector<at::Tensor> c3_forward_wide_cached_hs_amx_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t);
 std::vector<at::Tensor> c3_forward_saved_t_amx_v3(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t);
@@ -33,12 +37,16 @@ std::vector<at::Tensor> c3_backward_saved_t_amx_v3(const at::Tensor&,const at::T
 std::vector<at::Tensor> c3_backward_aggregate_saved_amx_v4(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t,bool);
 std::vector<at::Tensor> c3_backward_wide_amx_v3(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t,bool);
 std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t,bool);
+std::vector<at::Tensor> c3_backward_aggregate_highd_dp_amx_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t);
 std::vector<at::Tensor> c3_backward_transform_highd_amx_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t,bool);
 std::vector<at::Tensor> c3_backward_transform_highd_single_scan_amx_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t,bool);
 at::Tensor c3_selected_pull_bf16_shadow_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t);
 at::Tensor c3_rect_pull_bf16_scaled_fp32_shadow_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t);
 at::Tensor c3_rect_pull_bf16_shadow_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t);
+at::Tensor c3_rect_pull_bf16_accumulate_fp32_shadow_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,const at::Tensor&,int64_t);
 std::vector<at::Tensor> c3_build_selected_transpose_shadow_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&);
+std::vector<at::Tensor> c3_fused_hidden_bridge_shadow_v1(const at::Tensor&,const at::Tensor&,const at::Tensor&,double,int64_t);
+at::Tensor c3_fused_hidden_bridge_backward_shadow_v1(const at::Tensor&,const at::Tensor&,double,int64_t);
 
 std::string architecture_version() { return "TFS-Train-v2-single-runtime"; }
 
@@ -69,10 +77,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("c3_compact_dw_bf16_amx_shadow_v1", &c3_compact_dw_bf16_amx_shadow_v1);
   m.def("c3_compact_dw_bf16_amx_shadow_v2", &c3_compact_dw_bf16_amx_shadow_v2);
   m.def("c3_compact_logits_amx_shadow_v1", &c3_compact_logits_amx_shadow_v1);
+  m.def("c3_pack_compact_logits_weight_amx_shadow_v1", &c3_pack_compact_logits_weight_amx_shadow_v1);
+  m.def("c3_compact_logits_packed_amx_shadow_v2", &c3_compact_logits_packed_amx_shadow_v2);
+  m.def("c3_pack_compact_q_weight_amx_shadow_v1", &c3_pack_compact_q_weight_amx_shadow_v1);
+  m.def("c3_compact_q_packed_bf16_amx_shadow_v1", &c3_compact_q_packed_bf16_amx_shadow_v1);
   m.def("c3_forward_wide_amx_v3", &c3_forward_wide_amx_v3);
   m.def("c3_forward_wide_cached_hs_amx_v1", &c3_forward_wide_cached_hs_amx_v1);
   m.def("c3_backward_wide_amx_v3", &c3_backward_wide_amx_v3);
   m.def("c3_backward_aggregate_highd_amx_v1", &c3_backward_aggregate_highd_amx_v1);
+  m.def("c3_backward_aggregate_highd_dp_amx_v1", &c3_backward_aggregate_highd_dp_amx_v1);
   m.def("c3_backward_transform_highd_amx_v1", &c3_backward_transform_highd_amx_v1);
   m.def("c3_backward_transform_highd_single_scan_amx_v1", &c3_backward_transform_highd_single_scan_amx_v1);
   m.def("c3_forward_saved_t_amx_v3", &c3_forward_saved_t_amx_v3);
@@ -81,5 +94,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("c3_selected_pull_bf16_shadow_v1", &c3_selected_pull_bf16_shadow_v1);
   m.def("c3_rect_pull_bf16_scaled_fp32_shadow_v1", &c3_rect_pull_bf16_scaled_fp32_shadow_v1);
   m.def("c3_rect_pull_bf16_shadow_v1", &c3_rect_pull_bf16_shadow_v1);
+  m.def("c3_rect_pull_bf16_accumulate_fp32_shadow_v1", &c3_rect_pull_bf16_accumulate_fp32_shadow_v1);
   m.def("c3_build_selected_transpose_shadow_v1", &c3_build_selected_transpose_shadow_v1);
+  m.def("c3_fused_hidden_bridge_shadow_v1", &c3_fused_hidden_bridge_shadow_v1);
+  m.def("c3_fused_hidden_bridge_backward_shadow_v1", &c3_fused_hidden_bridge_backward_shadow_v1);
 }

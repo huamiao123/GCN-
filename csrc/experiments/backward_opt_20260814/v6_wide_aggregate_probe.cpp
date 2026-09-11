@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
@@ -34,16 +35,21 @@ using bv2::bf16;
 namespace {
 
 struct ColidxValidationEntry {
-  const std::int64_t* identity;
-  std::int64_t count;
+  at::Tensor source;
+  std::uint32_t version;
   bool valid;
 };
+
+constexpr std::size_t kColidxCacheEntryLimit = 8;
 
 // The validation cache is process-global rather than a local static inside
 // an inline helper.  Intel's optimizer may clone inline call sites, which can
 // otherwise turn the supposedly one-time ``auto`` check back into a full CSR
-// scan on every invocation.  The cache is keyed by CSR pointer and length so
-// one process may safely serve more than one immutable graph.
+// scan on every invocation.  Keep the source tensor alive and include its
+// version counter in the key: pointer+length alone permits an ABA hit after an
+// allocator reuses an address, and cannot detect an in-place graph mutation.
+// The small FIFO bound also prevents a process serving many graphs from
+// retaining every CSR forever.
 std::mutex g_colidx_validation_mu;
 std::vector<ColidxValidationEntry> g_colidx_validation_cache;
 
@@ -114,8 +120,7 @@ inline bool formal_mode_enabled(const char* name, bool auto_value) {
   return false;
 }
 
-bool formal_colidx_enabled(bool legacy, const std::int64_t* ci,
-                           std::int64_t count) {
+bool formal_colidx_enabled(bool legacy, const at::Tensor& colidx) {
   const char* v = std::getenv("TFS_COLIDX");
   if (v == nullptr || *v == '\0') return legacy;
   if (std::strcmp(v, "int64") == 0 || std::strcmp(v, "off") == 0 ||
@@ -130,12 +135,18 @@ bool formal_colidx_enabled(bool legacy, const std::int64_t* ci,
   // every forward/backward call.  Products has 123M+ entries, so the old
   // per-call validation added roughly 100 ms to every layer invocation and
   // erased the intended int32 CSR benefit.  The graph tensors are immutable
-  // for the full-batch training contract; pointer+length is therefore the
-  // same identity used by the conversion workspace below.
+  // for the full-batch training contract, but make that assumption explicit
+  // and fail closed if the tensor version changes.
   std::lock_guard<std::mutex> lock(g_colidx_validation_mu);
+  const std::uint32_t version =
+      colidx.unsafeGetTensorImpl()->version_counter().current_version();
   for (const auto& entry : g_colidx_validation_cache) {
-    if (entry.identity == ci && entry.count == count) return entry.valid;
+    if (entry.source.unsafeGetTensorImpl() == colidx.unsafeGetTensorImpl() &&
+        entry.version == version)
+      return entry.valid;
   }
+  const auto* ci = colidx.data_ptr<std::int64_t>();
+  const std::int64_t count = colidx.numel();
   bool valid = true;
   for (std::int64_t e = 0; e < count; ++e) {
     if (ci[e] < 0 || ci[e] > INT32_MAX) {
@@ -143,7 +154,9 @@ bool formal_colidx_enabled(bool legacy, const std::int64_t* ci,
       break;
     }
   }
-  g_colidx_validation_cache.push_back({ci, count, valid});
+  if (g_colidx_validation_cache.size() >= kColidxCacheEntryLimit)
+    g_colidx_validation_cache.erase(g_colidx_validation_cache.begin());
+  g_colidx_validation_cache.push_back({colidx, version, valid});
   return valid;
 }
 
@@ -837,11 +850,16 @@ void pull_panel_scaled_grad(
 }
 
 struct Int32IndexWorkspace {
-  const std::int64_t* identity;
+  at::Tensor source;
+  std::uint32_t version;
   std::int64_t count;
   AlignedBuffer<std::int32_t> values;
-  Int32IndexWorkspace(const std::int64_t* ci,std::int64_t count_)
-      : identity(ci),count(count_),values(static_cast<std::size_t>(count_)) {
+  explicit Int32IndexWorkspace(const at::Tensor& colidx)
+      : source(colidx),
+        version(colidx.unsafeGetTensorImpl()->version_counter().current_version()),
+        count(colidx.numel()),
+        values(static_cast<std::size_t>(count)) {
+    const auto* ci=colidx.data_ptr<std::int64_t>();
     for(std::int64_t e=0;e<count;++e){
       TORCH_CHECK(ci[e]>=0 && ci[e]<=INT32_MAX,
                   "E9 int32 colidx conversion out of range");
@@ -850,17 +868,22 @@ struct Int32IndexWorkspace {
   }
 };
 
-const std::int32_t* int32_colidx_workspace(const std::int64_t* ci,
-                                           std::int64_t count,bool& reused) {
+const std::int32_t* int32_colidx_workspace(const at::Tensor& colidx,
+                                           bool& reused) {
   static std::mutex mu;
   static std::vector<std::unique_ptr<Int32IndexWorkspace>> cache;
   std::lock_guard<std::mutex> lock(mu);
-  for(auto& ws:cache)if(ws->identity==ci && ws->count==count){
+  const std::uint32_t version=
+      colidx.unsafeGetTensorImpl()->version_counter().current_version();
+  for(auto& ws:cache)if(
+      ws->source.unsafeGetTensorImpl()==colidx.unsafeGetTensorImpl() &&
+      ws->version==version){
     reused=true;
     return ws->values.data();
   }
   reused=false;
-  cache.emplace_back(std::make_unique<Int32IndexWorkspace>(ci,count));
+  if(cache.size()>=kColidxCacheEntryLimit)cache.erase(cache.begin());
+  cache.emplace_back(std::make_unique<Int32IndexWorkspace>(colidx));
   return cache.back()->values.data();
 }
 
@@ -1440,9 +1463,9 @@ static std::vector<at::Tensor> c3_forward_amx_impl(
   const float* xp=x.data_ptr<float>();const float* sp=s.data_ptr<float>();
   const std::int64_t* rp=rp_t.data_ptr<std::int64_t>();const std::int64_t* ci=ci_t.data_ptr<std::int64_t>();
   bool e9_index_reused=false;
-  const bool use_e9=formal_colidx_enabled(glue_e9,ci,ci_t.numel());
+  const bool use_e9=formal_colidx_enabled(glue_e9,ci_t);
   const std::int32_t* ci32=use_e9?
-      int32_colidx_workspace(ci,ci_t.numel(),e9_index_reused):nullptr;
+      int32_colidx_workspace(ci_t,e9_index_reused):nullptr;
   const double profile_setup=now_ms();
   const bool hs_replicated = cached_hs_replicas_in != nullptr;
   const bool hs_cached = cached_hs_in != nullptr || hs_replicated;
@@ -1957,6 +1980,71 @@ at::Tensor c3_rect_pull_bf16_shadow_v1(
   return out;
 }
 
+// Source-panel consumer used only by the no-global-Gs/no-global-Q gate.
+// Each static rectangular CSR contains the edges sourced by one compact Q
+// panel.  Destination rows are exclusively owned according to `schedule`, so
+// contributions can accumulate directly into the caller's final FP32 dH
+// buffer without atomics or a per-panel N*K temporary.  Rounding and output
+// scaling deliberately remain outside this primitive and occur once after
+// all source panels have been consumed.
+at::Tensor c3_rect_pull_bf16_accumulate_fp32_shadow_v1(
+    const at::Tensor& q_in, const at::Tensor& rowptr_in,
+    const at::Tensor& colidx_in, const at::Tensor& schedule_in,
+    const at::Tensor& output_in, int64_t threads64) {
+  auto q = q_in.contiguous();
+  auto rowptr = rowptr_in.contiguous();
+  auto colidx = colidx_in.contiguous();
+  auto schedule = schedule_in.contiguous();
+  auto output = output_in;
+  const int threads = static_cast<int>(threads64);
+  TORCH_CHECK(q.device().is_cpu() && q.scalar_type() == at::kBFloat16 &&
+              q.dim() == 2 && q.size(1) >= 1 && q.size(1) <= 128,
+              "rectangular accumulate expects CPU BF16 Q[M,K], K<=128");
+  TORCH_CHECK(rowptr.device().is_cpu() && rowptr.scalar_type() == at::kLong &&
+              rowptr.dim() == 1 && rowptr.numel() >= 2 &&
+              colidx.device().is_cpu() && colidx.scalar_type() == at::kLong &&
+              colidx.dim() == 1 && schedule.device().is_cpu() &&
+              schedule.scalar_type() == at::kLong && schedule.dim() == 1 &&
+              schedule.numel() == threads + 1 && output.device().is_cpu() &&
+              output.scalar_type() == at::kFloat && output.is_contiguous() &&
+              output.dim() == 2 && output.size(0) == rowptr.numel() - 1 &&
+              output.size(1) == q.size(1) && threads >= 1 && threads <= 32,
+              "rectangular accumulate CSR/schedule/output contract failed");
+  const int n = static_cast<int>(output.size(0));
+  const int m = static_cast<int>(q.size(0));
+  const int k = static_cast<int>(q.size(1));
+  const bf16* src = reinterpret_cast<const bf16*>(q.data_ptr<at::BFloat16>());
+  const std::int64_t* rp = rowptr.data_ptr<std::int64_t>();
+  const std::int64_t* ci = colidx.data_ptr<std::int64_t>();
+  const std::int64_t* cuts = schedule.data_ptr<std::int64_t>();
+  float* dst = output.data_ptr<float>();
+  parallel_workers(threads, [&](int tid) {
+    const std::int64_t begin = cuts[tid];
+    const std::int64_t end = cuts[tid + 1];
+    TORCH_CHECK(begin >= 0 && begin <= end && end <= n,
+                "rectangular accumulate schedule range is invalid");
+    for (std::int64_t row = begin; row < end; ++row) {
+      float* out_row = dst + static_cast<std::size_t>(row) * k;
+      for (int q0 = 0; q0 < k; q0 += 16) {
+        const int lanes = std::min(16, k - q0);
+        const __mmask16 mask = lanes == 16 ? static_cast<__mmask16>(0xffffu)
+            : static_cast<__mmask16>((1u << lanes) - 1u);
+        __m512 sum = _mm512_maskz_loadu_ps(mask, out_row + q0);
+        for (std::int64_t e = rp[row]; e < rp[row + 1]; ++e) {
+          const std::int64_t compact64 = ci[e];
+          TORCH_CHECK(compact64 >= 0 && compact64 < m,
+                      "rectangular accumulate compact column is out of range");
+          const bf16* p = src + static_cast<std::size_t>(compact64) * k + q0;
+          sum = _mm512_add_ps(sum, lanes == 16
+              ? load_bf16x16_fp32(p) : load_bf16_tail_fp32(p, lanes));
+        }
+        _mm512_mask_storeu_ps(out_row + q0, mask, sum);
+      }
+    }
+  });
+  return output;
+}
+
 std::vector<at::Tensor> c3_build_selected_transpose_shadow_v1(
     const at::Tensor& row_ids_in, const at::Tensor& rowptr_in,
     const at::Tensor& colidx_in) {
@@ -2001,6 +2089,116 @@ std::vector<at::Tensor> c3_build_selected_transpose_shadow_v1(
       oci[cursor[static_cast<std::size_t>(ci[e])]++] = j;
   }
   return {out_rp, out_ci};
+}
+
+// Training-only inter-layer bridge.  One pass produces both the ordinary
+// FP32 activation consumed by autograd and the source-scaled BF16 staging
+// consumed by the next C3 layer.  The byte state combines ReLU and dropout
+// activity so backward does not retain or reread the pre-activation tensor.
+std::vector<at::Tensor> c3_fused_hidden_bridge_shadow_v1(
+    const at::Tensor& input_in, const at::Tensor& source_scale_in,
+    const at::Tensor& dropout_mask_in, double dropout_scale,
+    int64_t threads64) {
+  auto input = input_in.contiguous();
+  auto source_scale = source_scale_in.contiguous();
+  auto dropout_mask = dropout_mask_in.contiguous();
+  const int threads = static_cast<int>(threads64);
+  TORCH_CHECK(input.device().is_cpu() && input.scalar_type() == at::kFloat &&
+              input.dim() == 2 && source_scale.device().is_cpu() &&
+              source_scale.scalar_type() == at::kFloat &&
+              source_scale.dim() == 1 &&
+              source_scale.numel() == input.size(0) &&
+              dropout_mask.device().is_cpu() &&
+              dropout_mask.scalar_type() == at::kByte &&
+              dropout_mask.sizes() == input.sizes() &&
+              std::isfinite(dropout_scale) && dropout_scale > 0.0 &&
+              threads >= 1 && threads <= 32,
+              "fused hidden bridge contract failed");
+  const std::int64_t n = input.size(0);
+  const int k = static_cast<int>(input.size(1));
+  auto output = at::empty_like(input);
+  auto staged = at::empty(input.sizes(),
+      input.options().dtype(at::kBFloat16));
+  auto state = at::empty(input.sizes(), input.options().dtype(at::kByte));
+  const float* xp = input.data_ptr<float>();
+  const float* sp = source_scale.data_ptr<float>();
+  const std::uint8_t* mp = dropout_mask.data_ptr<std::uint8_t>();
+  float* op = output.data_ptr<float>();
+  bf16* hp = reinterpret_cast<bf16*>(staged.data_ptr<at::BFloat16>());
+  std::uint8_t* statep = state.data_ptr<std::uint8_t>();
+  const __m512 zero = _mm512_setzero_ps();
+  const __m512 keep = _mm512_set1_ps(static_cast<float>(dropout_scale));
+  parallel_range(n, threads, [&](std::int64_t begin, std::int64_t end) {
+    for (std::int64_t row = begin; row < end; ++row) {
+      const std::size_t base = static_cast<std::size_t>(row) * k;
+      const __m512 row_scale = _mm512_set1_ps(sp[row]);
+      int q = 0;
+      for (; q + 16 <= k; q += 16) {
+        const __m128i mask_bytes = _mm_loadu_si128(
+            reinterpret_cast<const __m128i*>(mp + base + q));
+        const __mmask16 dropout_bits = _mm_cmpneq_epi8_mask(
+            mask_bytes, _mm_setzero_si128());
+        const __m512 value = _mm512_loadu_ps(xp + base + q);
+        const __mmask16 positive = _mm512_cmp_ps_mask(
+            value, zero, _CMP_GT_OQ);
+        const __mmask16 active = dropout_bits & positive;
+        const __m512 activated = _mm512_maskz_mul_ps(active, value, keep);
+        _mm512_storeu_ps(op + base + q, activated);
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(hp + base + q),
+            _mm512_cvtneps_pbh(_mm512_mul_ps(activated, row_scale)));
+        _mm_storeu_si128(
+            reinterpret_cast<__m128i*>(statep + base + q),
+            _mm_maskz_set1_epi8(active, 1));
+      }
+      for (; q < k; ++q) {
+        const bool active = xp[base + q] > 0.0f && mp[base + q] != 0;
+        const float activated = active
+            ? xp[base + q] * static_cast<float>(dropout_scale) : 0.0f;
+        op[base + q] = activated;
+        hp[base + q] = to_bf16(activated * sp[row]);
+        statep[base + q] = static_cast<std::uint8_t>(active);
+      }
+    }
+  });
+  return {output, staged, state};
+}
+
+at::Tensor c3_fused_hidden_bridge_backward_shadow_v1(
+    const at::Tensor& grad_in, const at::Tensor& state_in,
+    double dropout_scale, int64_t threads64) {
+  auto grad = grad_in.contiguous();
+  auto state = state_in.contiguous();
+  const int threads = static_cast<int>(threads64);
+  TORCH_CHECK(grad.device().is_cpu() && grad.scalar_type() == at::kFloat &&
+              grad.dim() == 2 && state.device().is_cpu() &&
+              state.scalar_type() == at::kByte &&
+              state.sizes() == grad.sizes() &&
+              std::isfinite(dropout_scale) && dropout_scale > 0.0 &&
+              threads >= 1 && threads <= 32,
+              "fused hidden bridge backward contract failed");
+  auto output = at::empty_like(grad);
+  const float* gp = grad.data_ptr<float>();
+  const std::uint8_t* statep = state.data_ptr<std::uint8_t>();
+  float* op = output.data_ptr<float>();
+  const std::int64_t elements = grad.numel();
+  const __m512 keep = _mm512_set1_ps(static_cast<float>(dropout_scale));
+  parallel_range(elements, threads,
+                 [&](std::int64_t begin, std::int64_t end) {
+    std::int64_t index = begin;
+    for (; index + 16 <= end; index += 16) {
+      const __m128i state_bytes = _mm_loadu_si128(
+          reinterpret_cast<const __m128i*>(statep + index));
+      const __mmask16 active = _mm_cmpneq_epi8_mask(
+          state_bytes, _mm_setzero_si128());
+      _mm512_storeu_ps(op + index, _mm512_maskz_mul_ps(
+          active, _mm512_loadu_ps(gp + index), keep));
+    }
+    for (; index < end; ++index)
+      op[index] = statep[index]
+          ? gp[index] * static_cast<float>(dropout_scale) : 0.0f;
+  });
+  return output;
 }
 
 // V2 producer for a persistent Hs buffer with a 64-element AMX-safe row
@@ -2079,8 +2277,9 @@ at::Tensor c3_replicate_static_hs_numa_v1(const at::Tensor& hs_in,
 // Optional V3 producer for an aggregate-first static layer.  It materializes
 // T0 = B * Q_BF16(S * X) once, using the same CSR pull, BF16 conversion and
 // schedule flags as the ordinary aggregate-first C3 forward.  The API is
-// deliberately opt-in: transform-first layers cannot use this cache because
-// their dense product depends on the changing weight matrix.
+// deliberately opt-in.  A static K>D layer may also use it because SX is
+// independent of the changing weight matrix even when the dynamic planner
+// would normally choose the algebraically equivalent S(XW) expression.
 at::Tensor c3_scale_grad_bf16_v1(
     const at::Tensor&, const at::Tensor&, int64_t);
 std::vector<at::Tensor> c3_backward_saved_t_amx_v3(
@@ -2111,8 +2310,8 @@ at::Tensor c3_prepare_static_aggregate_v3(
               "static aggregate cache producer contract failed");
   const int n=static_cast<int>(x.size(0));
   const int k=static_cast<int>(x.size(1));
-  TORCH_CHECK(k>=1 && k<=128,
-              "static aggregate cache currently requires 1<=K<=128");
+  TORCH_CHECK(k>=1,
+              "static aggregate cache requires K>=1");
   auto hs=build_hs_bf16_exact(x,s,threads);
   auto pulled=at::empty({n,k},hs.options());
   const std::int64_t* rp=rp_t.data_ptr<std::int64_t>();
@@ -2122,9 +2321,9 @@ at::Tensor c3_prepare_static_aggregate_v3(
   const bool glue_e9=experiment_flag("TFS_GLUE_E9_INT32_COLIDX");
   const bool fwd_v2=experiment_flag("TFS_FWD_V2_SINGLE_SCAN");
   bool e9_index_reused=false;
-  const bool use_e9=formal_colidx_enabled(glue_e9,ci,ci_t.numel());
+  const bool use_e9=formal_colidx_enabled(glue_e9,ci_t);
   const std::int32_t* ci32=use_e9?
-      int32_colidx_workspace(ci,ci_t.numel(),e9_index_reused):nullptr;
+      int32_colidx_workspace(ci_t,e9_index_reused):nullptr;
   const int panel=512;
   std::vector<std::vector<int>> own_local;
   bool schedule_reused=false;
@@ -2251,7 +2450,7 @@ std::vector<at::Tensor> c3_backward_cached_aggregate_amx_v3(
               rowptr.numel()==n+1 && colidx.device().is_cpu() &&
               colidx.scalar_type()==at::kLong && scale.device().is_cpu() &&
               scale.scalar_type()==at::kFloat && scale.numel()==n &&
-              k>=1 && k<=128,
+              k>=1,
               "cached aggregate backward contract failed");
   // Reuse the established AMX saved-T dW kernel.  It performs the same
   // BF16 grad scaling, T2 transpose, direct H-panel packing and hierarchical
@@ -2370,9 +2569,9 @@ at::Tensor c3_pull_only_amx_v1(
   const std::int64_t* rp=rp_t.data_ptr<std::int64_t>();
   const std::int64_t* ci=ci_t.data_ptr<std::int64_t>();
   bool e9_index_reused=false;
-  const bool use_e9=formal_colidx_enabled(glue_e9,ci,ci_t.numel());
+  const bool use_e9=formal_colidx_enabled(glue_e9,ci_t);
   const std::int32_t* ci32=use_e9?
-      int32_colidx_workspace(ci,ci_t.numel(),e9_index_reused):nullptr;
+      int32_colidx_workspace(ci_t,e9_index_reused):nullptr;
 
   // Match c3_forward_amx_impl's scale=ones Hs construction exactly: convert
   // the FP32 dP rows to BF16 before the sparse accumulation.
@@ -2482,9 +2681,9 @@ at::Tensor c3_pull_only_bf16_amx_v1(
   const std::int64_t* rp = rp_t.data_ptr<std::int64_t>();
   const std::int64_t* ci = ci_t.data_ptr<std::int64_t>();
   bool e9_index_reused = false;
-  const bool use_e9 = formal_colidx_enabled(glue_e9, ci, ci_t.numel());
+  const bool use_e9 = formal_colidx_enabled(glue_e9, ci_t);
   const std::int32_t* ci32 = use_e9
-      ? int32_colidx_workspace(ci, ci_t.numel(), e9_index_reused) : nullptr;
+      ? int32_colidx_workspace(ci_t, e9_index_reused) : nullptr;
 
   auto pulled = at::empty({n, k}, x.options());
   bf16* dst = reinterpret_cast<bf16*>(
@@ -2826,46 +3025,66 @@ at::Tensor c3_compact_dw_bf16_amx_shadow_v2(
 // 4-C-tile kernel applied after supervision-scoped sparse pull; scale and bias
 // stay in the native epilogue.  Weight packing is deliberately included in
 // the call until a whole-terminal fused interface can safely reuse it.
-at::Tensor c3_compact_logits_amx_shadow_v1(
-    const at::Tensor& pulled_in, const at::Tensor& weight_in,
-    const at::Tensor& bias_in, const at::Tensor& scale_in,
-    int64_t threads64) {
-  const double t0=now_ms();
-  auto pulled=pulled_in.contiguous(),weight=weight_in.contiguous();
-  auto bias=bias_in.contiguous(),scale=scale_in.contiguous();
-  TORCH_CHECK(pulled.device().is_cpu() && weight.device().is_cpu() &&
-              bias.device().is_cpu() && scale.device().is_cpu() &&
-              pulled.scalar_type()==at::kBFloat16 &&
-              weight.scalar_type()==at::kBFloat16 &&
-              bias.scalar_type()==at::kFloat &&
-              scale.scalar_type()==at::kFloat,
-              "compact-logits shadow expects CPU BF16 P/W and FP32 bias/scale");
-  TORCH_CHECK(pulled.dim()==2 && weight.dim()==2 && bias.dim()==1 &&
-              scale.dim()==1 && pulled.size(1)==weight.size(0) &&
-              bias.numel()==weight.size(1) && scale.numel()==pulled.size(0),
-              "compact-logits shadow shape contract failed");
-  const int m=static_cast<int>(pulled.size(0));
-  const int k=static_cast<int>(pulled.size(1));
+at::Tensor c3_pack_compact_logits_weight_amx_shadow_v1(
+    const at::Tensor& weight_in) {
+  auto weight=weight_in.contiguous();
+  TORCH_CHECK(weight.device().is_cpu() &&
+              weight.scalar_type()==at::kBFloat16 && weight.dim()==2,
+              "compact-logits pack expects a CPU BF16 matrix");
+  const int k=static_cast<int>(weight.size(0));
   const int d=static_cast<int>(weight.size(1));
-  const int threads=static_cast<int>(threads64);
-  TORCH_CHECK(m>=1 && k>=1 && k<=128 && d>=1 && threads>=1 && threads<=32,
-              "compact-logits shadow shape unsupported");
+  TORCH_CHECK(k>=1 && k<=128 && d>=1,
+              "compact-logits packed weight shape unsupported");
   const int kp=round_up(k,32),dp=round_up(d,16);
-  const bf16* pp=reinterpret_cast<const bf16*>(
-      pulled.data_ptr<at::BFloat16>());
   const bf16* wp=reinterpret_cast<const bf16*>(
       weight.data_ptr<at::BFloat16>());
-  const float* bp=bias.data_ptr<float>();
-  const float* sp=scale.data_ptr<float>();
   std::vector<bf16> wpad(static_cast<std::size_t>(kp)*dp,bf16(0));
   for(int q=0;q<k;++q)
     std::memcpy(wpad.data()+static_cast<std::size_t>(q)*dp,
                 wp+static_cast<std::size_t>(q)*d,
                 static_cast<std::size_t>(d)*sizeof(bf16));
-  std::vector<bf16> packed_w(
-      static_cast<std::size_t>(kp/32)*(dp/16)*512,bf16(0));
-  pack_rhs_into(wpad.data(),kp,dp,packed_w.data());
-  const double packed_at=now_ms();
+  auto packed=at::empty(
+      {static_cast<std::int64_t>(kp/32)*(dp/16)*512},weight.options());
+  auto* packed_ptr=reinterpret_cast<bf16*>(
+      packed.data_ptr<at::BFloat16>());
+  pack_rhs_into(wpad.data(),kp,dp,packed_ptr);
+  return packed;
+}
+
+at::Tensor c3_compact_logits_packed_amx_shadow_v2(
+    const at::Tensor& pulled_in, const at::Tensor& packed_weight_in,
+    const at::Tensor& bias_in, const at::Tensor& scale_in,
+    int64_t logical_d64, int64_t threads64) {
+  const double t0=now_ms();
+  auto pulled=pulled_in.contiguous();
+  auto packed_weight=packed_weight_in.contiguous();
+  auto bias=bias_in.contiguous(),scale=scale_in.contiguous();
+  TORCH_CHECK(pulled.device().is_cpu() && packed_weight.device().is_cpu() &&
+              bias.device().is_cpu() && scale.device().is_cpu() &&
+              pulled.scalar_type()==at::kBFloat16 &&
+              packed_weight.scalar_type()==at::kBFloat16 &&
+              bias.scalar_type()==at::kFloat &&
+              scale.scalar_type()==at::kFloat,
+              "packed compact-logits expects CPU BF16 P/W and FP32 bias/scale");
+  const int m=static_cast<int>(pulled.size(0));
+  const int k=static_cast<int>(pulled.size(1));
+  const int d=static_cast<int>(logical_d64);
+  const int threads=static_cast<int>(threads64);
+  TORCH_CHECK(pulled.dim()==2 && packed_weight.dim()==1 && bias.dim()==1 &&
+              scale.dim()==1 && bias.numel()==d && scale.numel()==m &&
+              m>=1 && k>=1 && k<=128 && d>=1 && threads>=1 && threads<=32,
+              "packed compact-logits shape contract failed");
+  const int kp=round_up(k,32),dp=round_up(d,16);
+  const std::int64_t expected_packed=
+      static_cast<std::int64_t>(kp/32)*(dp/16)*512;
+  TORCH_CHECK(packed_weight.numel()==expected_packed,
+              "packed compact-logits weight size mismatch");
+  const bf16* pp=reinterpret_cast<const bf16*>(
+      pulled.data_ptr<at::BFloat16>());
+  const bf16* packed_ptr=reinterpret_cast<const bf16*>(
+      packed_weight.data_ptr<at::BFloat16>());
+  const float* bp=bias.data_ptr<float>();
+  const float* sp=scale.data_ptr<float>();
   auto logits=at::empty({m,d},at::TensorOptions().dtype(at::kFloat));
   float* out=logits.data_ptr<float>();
   const int row_tiles=(m+15)/16;
@@ -2887,21 +3106,137 @@ at::Tensor c3_compact_logits_amx_shadow_v1(
                       static_cast<std::size_t>(k)*sizeof(bf16));
         a=a_pad.data();
       }
-      bv2::amx_gemm_4c_epilogue(
-          a,16,kp,packed_w,dp,d,row,valid,d,sp,bp,
+      bv2::amx_gemm_4c_epilogue_packed(
+          a,16,kp,packed_ptr,dp,d,row,valid,d,sp,bp,
           out+static_cast<std::size_t>(row)*d);
     }
     _tile_release();
   });
+  if(internal_profile_enabled())
+    std::cout<<std::fixed<<std::setprecision(6)
+      <<"TFS_INTERNAL,kind=compact_logits_packed_shadow,m="<<m<<",k="<<k
+      <<",d="<<d<<",threads="<<threads
+      <<",total_ms="<<(now_ms()-t0)<<std::endl;
+  return logits;
+}
+
+at::Tensor c3_compact_logits_amx_shadow_v1(
+    const at::Tensor& pulled_in, const at::Tensor& weight_in,
+    const at::Tensor& bias_in, const at::Tensor& scale_in,
+    int64_t threads64) {
+  const double t0=now_ms();
+  auto weight=weight_in.contiguous();
+  TORCH_CHECK(weight.dim()==2,
+              "compact-logits shadow weight must be a matrix");
+  auto packed=c3_pack_compact_logits_weight_amx_shadow_v1(weight);
+  const double packed_at=now_ms();
+  auto logits=c3_compact_logits_packed_amx_shadow_v2(
+      pulled_in,packed,bias_in,scale_in,weight.size(1),threads64);
   const double end=now_ms();
   if(internal_profile_enabled())
     std::cout<<std::fixed<<std::setprecision(6)
-      <<"TFS_INTERNAL,kind=compact_logits_shadow,m="<<m<<",k="<<k
-      <<",d="<<d<<",threads="<<threads
+      <<"TFS_INTERNAL,kind=compact_logits_shadow,m="<<pulled_in.size(0)
+      <<",k="<<pulled_in.size(1)<<",d="<<weight.size(1)
+      <<",threads="<<threads64
       <<",pack_weight_ms="<<(packed_at-t0)
       <<",gemm_epilogue_ms="<<(end-packed_at)
       <<",total_ms="<<(end-t0)<<std::endl;
   return logits;
+}
+
+// Pack terminal W^T[D,K] once for Q=Gs*W^T.  This is deliberately separate
+// from logits packing: the reduction dimension is the potentially very wide
+// class dimension D, while the BF16 output width K uses the High-D dH kernel's
+// 64-column physical contract.
+at::Tensor c3_pack_compact_q_weight_amx_shadow_v1(
+    const at::Tensor& weight_in) {
+  auto weight = weight_in.contiguous();
+  TORCH_CHECK(weight.device().is_cpu() &&
+              weight.scalar_type() == at::kBFloat16 && weight.dim() == 2,
+              "compact-Q pack expects CPU BF16 W[K,D]");
+  const int k = static_cast<int>(weight.size(0));
+  const int d = static_cast<int>(weight.size(1));
+  TORCH_CHECK(k >= 1 && k <= 128 && d >= 1,
+              "compact-Q packed weight shape unsupported");
+  const int dp = round_up(d, 32);
+  const int kp = round_up(k, 64);
+  const bf16* wp = reinterpret_cast<const bf16*>(
+      weight.data_ptr<at::BFloat16>());
+  std::vector<bf16> wt(static_cast<std::size_t>(dp) * kp, bf16(0));
+  for (int p = 0; p < k; ++p)
+    for (int q = 0; q < d; ++q)
+      wt[static_cast<std::size_t>(q) * kp + p] =
+          wp[static_cast<std::size_t>(p) * d + q];
+  auto packed = at::empty(
+      {static_cast<std::int64_t>(dp / 32) * (kp / 16) * 512},
+      weight.options());
+  pack_rhs_into(wt.data(), dp, kp, reinterpret_cast<bf16*>(
+      packed.data_ptr<at::BFloat16>()));
+  return packed;
+}
+
+at::Tensor c3_compact_q_packed_bf16_amx_shadow_v1(
+    const at::Tensor& gs_in, const at::Tensor& packed_weight_t_in,
+    int64_t logical_k64, int64_t threads64) {
+  const double t0 = now_ms();
+  auto gs = gs_in.contiguous();
+  auto packed_weight_t = packed_weight_t_in.contiguous();
+  const int m = static_cast<int>(gs.size(0));
+  const int d = static_cast<int>(gs.size(1));
+  const int k = static_cast<int>(logical_k64);
+  const int threads = static_cast<int>(threads64);
+  TORCH_CHECK(gs.device().is_cpu() && gs.scalar_type() == at::kBFloat16 &&
+              gs.dim() == 2 && packed_weight_t.device().is_cpu() &&
+              packed_weight_t.scalar_type() == at::kBFloat16 &&
+              packed_weight_t.dim() == 1 && m >= 1 && d >= 1 &&
+              k >= 1 && k <= 128 && threads >= 1 && threads <= 32,
+              "packed compact-Q shape contract failed");
+  const int dp = round_up(d, 32);
+  const int kp = round_up(k, 64);
+  const std::int64_t expected =
+      static_cast<std::int64_t>(dp / 32) * (kp / 16) * 512;
+  TORCH_CHECK(packed_weight_t.numel() == expected,
+              "packed compact-Q weight size mismatch");
+  const bf16* gp = reinterpret_cast<const bf16*>(
+      gs.data_ptr<at::BFloat16>());
+  const bf16* packed = reinterpret_cast<const bf16*>(
+      packed_weight_t.data_ptr<at::BFloat16>());
+  auto q_padded = at::empty({m, kp}, gs.options());
+  bf16* qp = reinterpret_cast<bf16*>(
+      q_padded.data_ptr<at::BFloat16>());
+  const int row_tiles = (m + 15) / 16;
+  parallel_workers(threads, [&](int tid) {
+    bv2::configure_amx_tiles_16x64();
+    std::vector<bf16> a_pad;
+    if (dp != d || (m % 16) != 0)
+      a_pad.resize(static_cast<std::size_t>(16) * dp);
+    const int begin = row_tiles * tid / threads;
+    const int end = row_tiles * (tid + 1) / threads;
+    for (int tile = begin; tile < end; ++tile) {
+      const int row0 = tile * 16;
+      const int valid = std::min(16, m - row0);
+      const bf16* a = gp + static_cast<std::size_t>(row0) * d;
+      if (valid != 16 || dp != d) {
+        std::fill(a_pad.begin(), a_pad.end(), bf16(0));
+        for (int row = 0; row < valid; ++row)
+          std::memcpy(a_pad.data() + static_cast<std::size_t>(row) * dp,
+                      gp + static_cast<std::size_t>(row0 + row) * d,
+                      static_cast<std::size_t>(d) * sizeof(bf16));
+        a = a_pad.data();
+      }
+      bv2::dh_amx_4c2a2b_bf16(
+          a, 16, valid, dp, packed, k, kp, qp, row0, true, nullptr);
+    }
+    _tile_release();
+  });
+  at::Tensor q = kp == k
+      ? q_padded : q_padded.narrow(1, 0, k).contiguous();
+  if (internal_profile_enabled())
+    std::cout << std::fixed << std::setprecision(6)
+              << "TFS_INTERNAL,kind=compact_q_packed_shadow,m=" << m
+              << ",d=" << d << ",k=" << k << ",threads=" << threads
+              << ",total_ms=" << (now_ms() - t0) << std::endl;
+  return q;
 }
 
 // Generic aggregate-saved backward.  The forward has already materialized
@@ -2953,8 +3288,11 @@ std::vector<at::Tensor> c3_backward_aggregate_saved_amx_v4(
   if(compute_dx){
     const double p0=now_ms();
     auto wb=weight.to(at::kBFloat16);
-    auto dp=at::matmul(gs,wb.transpose(0,1).contiguous()).to(at::kFloat);
-    auto dh=c3_pull_only_amx_v1(dp,rp,ci,threads);
+    // BF16 x BF16 already produces the rounded BF16 dP consumed by sparse
+    // pull.  The historical path widened it to FP32 only for the FP32 entry
+    // point to immediately round it back to BF16 inside that function.
+    auto dp=at::matmul(gs,wb.transpose(0,1).contiguous());
+    auto dh=c3_pull_only_bf16_amx_v1(dp,rp,ci,threads);
     dx=dh*scale.unsqueeze(1);
     pull_ms=now_ms()-p0;
   }
@@ -3008,9 +3346,9 @@ static std::vector<at::Tensor> c3_forward_wide_amx_impl(
   const std::int64_t* rp=rp_t.data_ptr<std::int64_t>();
   const std::int64_t* ci=ci_t.data_ptr<std::int64_t>();
   bool e9_index_reused=false;
-  const bool use_e9=formal_colidx_enabled(glue_e9,ci,ci_t.numel());
+  const bool use_e9=formal_colidx_enabled(glue_e9,ci_t);
   const std::int32_t* ci32=use_e9?
-      int32_colidx_workspace(ci,ci_t.numel(),e9_index_reused):nullptr;
+      int32_colidx_workspace(ci_t,e9_index_reused):nullptr;
   at::Tensor hs;
   if (cached_hs_in != nullptr) {
     TORCH_CHECK(cached_hs_in->device().is_cpu() &&
@@ -3175,9 +3513,9 @@ std::vector<at::Tensor> c3_backward_amx_v2(
   const bf16* hs_bf=hs.scalar_type()==at::kBFloat16?reinterpret_cast<const bf16*>(hs.data_ptr<at::BFloat16>()):nullptr;
   const std::int64_t* rp=rp_t.data_ptr<std::int64_t>();const std::int64_t* ci=ci_t.data_ptr<std::int64_t>();
   bool e9_index_reused=false;
-  const bool use_e9=formal_colidx_enabled(glue_e9,ci,ci_t.numel());
+  const bool use_e9=formal_colidx_enabled(glue_e9,ci_t);
   const std::int32_t* ci32=use_e9?
-      int32_colidx_workspace(ci,ci_t.numel(),e9_index_reused):nullptr;
+      int32_colidx_workspace(ci_t,e9_index_reused):nullptr;
   const int hs_stride=static_cast<int>(hs.stride(0));
   // Compute the dataflow contract before looking up a workspace.  These
   // booleans are part of the cache key, so an entry can never be reused with
@@ -3753,9 +4091,9 @@ std::vector<at::Tensor> c3_backward_transform_highd_amx_v1(
     const at::Tensor& weight_in, const at::Tensor& rowptr_in,
     const at::Tensor& colidx_in, const at::Tensor& scale_in,
     int64_t threads64, bool compute_dx) {
-  auto grad = grad_in.contiguous();
+  auto grad = grad_in;
   auto hs = hs_in.contiguous();
-  auto weight = weight_in.contiguous();
+  auto weight = weight_in;
   auto rowptr = rowptr_in.contiguous();
   auto colidx = colidx_in.contiguous();
   auto scale = scale_in.contiguous();
@@ -3773,11 +4111,18 @@ std::vector<at::Tensor> c3_backward_transform_highd_amx_v1(
   TORCH_CHECK(grad.dim() == 2 && hs.dim() == 2 && weight.dim() == 2 &&
               rowptr.dim() == 1 && colidx.dim() == 1 && scale.dim() == 1,
               "transform high-D expects rank-2 inputs");
+  TORCH_CHECK(grad.stride(1) == 1 && weight.stride(1) == 1 &&
+              grad.stride(0) >= grad.size(1) &&
+              weight.stride(0) >= weight.size(1),
+              "transform high-D grad/weight require unit column stride");
   const int n = static_cast<int>(grad.size(0));
   const int d = static_cast<int>(grad.size(1));
   const int k = static_cast<int>(hs.size(1));
   const int hs_width = static_cast<int>(hs.size(1));
   const int threads = static_cast<int>(threads64);
+  const std::size_t grad_stride = static_cast<std::size_t>(grad.stride(0));
+  const std::size_t weight_stride =
+      static_cast<std::size_t>(weight.stride(0));
   TORCH_CHECK(n >= 1 && k > d && d > 128 && threads >= 1 && threads <= 32 &&
               weight.size(0) == k && weight.size(1) == d &&
               hs.size(0) == n && rowptr.numel() == n + 1 &&
@@ -3800,9 +4145,9 @@ std::vector<at::Tensor> c3_backward_transform_highd_amx_v1(
   const std::int64_t* ci = colidx.data_ptr<std::int64_t>();
   bool e9_index_reused = false;
   const bool use_e9 = formal_colidx_enabled(
-      experiment_flag("TFS_GLUE_E9_INT32_COLIDX"), ci, colidx.numel());
+      experiment_flag("TFS_GLUE_E9_INT32_COLIDX"), colidx);
   const std::int32_t* ci32 = use_e9
-      ? int32_colidx_workspace(ci, colidx.numel(), e9_index_reused) : nullptr;
+      ? int32_colidx_workspace(colidx, e9_index_reused) : nullptr;
 
   std::unique_lock<std::mutex> runtime_lock(highd_stream_runtime_mutex());
   auto& ws = highd_stream_workspace(dp, kp, threads, panel, compute_dx);
@@ -3817,7 +4162,7 @@ std::vector<at::Tensor> c3_backward_transform_highd_amx_v1(
   bf16* gsp = reinterpret_cast<bf16*>(gs.data_ptr<at::BFloat16>());
   parallel_range(n, threads, [&](std::int64_t begin, std::int64_t end) {
     for (std::int64_t row = begin; row < end; ++row) {
-      const float* gr = gp + static_cast<std::size_t>(row) * d;
+      const float* gr = gp + static_cast<std::size_t>(row) * grad_stride;
       bf16* dst = gsp + static_cast<std::size_t>(row) * dp;
       const __m512 sv = _mm512_set1_ps(sp[row]);
       int q = 0;
@@ -3841,7 +4186,7 @@ std::vector<at::Tensor> c3_backward_transform_highd_amx_v1(
         if (q >= d) continue;
         for (int p = 0; p < k; ++p)
           ws.wt.data()[static_cast<std::size_t>(q) * kp + p] =
-              to_bf16(wp[static_cast<std::size_t>(p) * d + q]);
+              to_bf16(wp[static_cast<std::size_t>(p) * weight_stride + q]);
       }
     });
     pack_rhs_into(ws.wt.data(), dp, kp, ws.packed_wt.data());
@@ -3993,9 +4338,9 @@ std::vector<at::Tensor> c3_backward_transform_highd_single_scan_amx_v1(
   const std::int64_t* ci = colidx.data_ptr<std::int64_t>();
   bool e9_index_reused = false;
   const bool use_e9 = formal_colidx_enabled(
-      experiment_flag("TFS_GLUE_E9_INT32_COLIDX"), ci, colidx.numel());
+      experiment_flag("TFS_GLUE_E9_INT32_COLIDX"), colidx);
   const std::int32_t* ci32 = use_e9
-      ? int32_colidx_workspace(ci, colidx.numel(), e9_index_reused) : nullptr;
+      ? int32_colidx_workspace(colidx, e9_index_reused) : nullptr;
 
   std::unique_lock<std::mutex> runtime_lock(highd_stream_runtime_mutex());
   auto& ws = highd_stream_workspace(dp, kp, threads, panel, compute_dx);
@@ -4104,14 +4449,15 @@ std::vector<at::Tensor> c3_backward_transform_highd_single_scan_amx_v1(
   return {dx, dw, db, meta};
 }
 
-std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
+static std::vector<at::Tensor> c3_backward_aggregate_highd_impl(
     const at::Tensor& grad_in, const at::Tensor& pulled_in,
     const at::Tensor& weight_in, const at::Tensor& rowptr_in,
     const at::Tensor& colidx_in, const at::Tensor& scale_in,
-    int64_t threads64, bool compute_dx) {
-  auto grad = grad_in.contiguous();
+    const at::Tensor& dp_accum_in, int64_t threads64, bool compute_dx,
+    bool return_dp) {
+  auto grad = grad_in;
   auto pulled = pulled_in.contiguous();
-  auto weight = weight_in.contiguous();
+  auto weight = weight_in;
   auto rowptr = rowptr_in.contiguous();
   auto colidx = colidx_in.contiguous();
   auto scale = scale_in.contiguous();
@@ -4127,10 +4473,25 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
   TORCH_CHECK(grad.dim() == 2 && pulled.dim() == 2 && weight.dim() == 2 &&
               rowptr.dim() == 1 && colidx.dim() == 1 && scale.dim() == 1,
               "aggregate high-D backward expects rank-2 tensors");
+  TORCH_CHECK(grad.stride(1) == 1 && weight.stride(1) == 1 &&
+              grad.stride(0) >= grad.size(1) &&
+              weight.stride(0) >= weight.size(1),
+              "aggregate high-D grad/weight require unit column stride");
   const int n = static_cast<int>(grad.size(0));
   const int d = static_cast<int>(grad.size(1));
   const int k = static_cast<int>(weight.size(0));
   const int threads = static_cast<int>(threads64);
+  TORCH_CHECK(!return_dp || compute_dx,
+              "aggregate high-D dP output requires compute_dx");
+  if (return_dp) {
+    TORCH_CHECK(dp_accum_in.defined() && dp_accum_in.device().is_cpu() &&
+                dp_accum_in.scalar_type() == at::kFloat &&
+                dp_accum_in.dim() == 2 && dp_accum_in.is_contiguous(),
+                "aggregate high-D dP accumulator must be contiguous CPU FP32");
+  }
+  const std::size_t grad_stride = static_cast<std::size_t>(grad.stride(0));
+  const std::size_t weight_stride =
+      static_cast<std::size_t>(weight.stride(0));
   TORCH_CHECK(n >= 1 && k >= 1 && d > 128 && threads >= 1 && threads <= 32 &&
               pulled.size(0) == n && pulled.size(1) == k &&
               weight.size(1) == d && rowptr.numel() == n + 1 &&
@@ -4142,6 +4503,10 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
   const int dp = round_up(d, 32);
   const int kp = round_up(k, 64);
   const int np = round_up(n, 32);
+  if (return_dp) {
+    TORCH_CHECK(dp_accum_in.size(0) == n && dp_accum_in.size(1) == kp,
+                "aggregate high-D dP accumulator shape mismatch");
+  }
   int panel = 512;
   if (const char* value = std::getenv("TFS_HIGHD_NATIVE_PANEL")) {
     char* end = nullptr;
@@ -4181,7 +4546,7 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
         if (q < d)
           for (int p = 0; p < k; ++p)
             ws.wt.data()[static_cast<std::size_t>(q) * kp + p] =
-                to_bf16(wp[static_cast<std::size_t>(p) * d + q]);
+                to_bf16(wp[static_cast<std::size_t>(p) * weight_stride + q]);
     });
     pack_rhs_into(ws.wt.data(), dp, kp, ws.packed_wt.data());
   }
@@ -4197,8 +4562,16 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
   // The BF16 AMX epilogue stores complete 32-row tiles.  Allocate the row
   // tail explicitly and narrow it back before CSR pull; otherwise an N that
   // is not a multiple of 32 writes past the logical dX tensor.
-  if (compute_dx)
-    d_padded = at::empty({np, kp}, grad.options().dtype(at::kBFloat16));
+  if (compute_dx) {
+    // A D-slab is only a workspace partition, not a numerical boundary.
+    // The one-final-pull variant must retain each slab's AMX FP32 result so
+    // the cross-slab reduction happens before the sole BF16 rounding at the
+    // dense-to-sparse boundary.  The legacy per-slab pull keeps its proven
+    // BF16 output contract.
+    d_padded = return_dp
+        ? dp_accum_in
+        : at::empty({np, kp}, grad.options().dtype(at::kBFloat16));
+  }
   const double profile_alloc1 = now_ms();
   const float* gp = grad.data_ptr<float>();
   const float* sp = scale.data_ptr<float>();
@@ -4261,7 +4634,8 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
             __m512 sum0 = _mm512_setzero_ps();
             __m512 sum1 = _mm512_setzero_ps();
             for (int row = tile0; row < tile1; ++row) {
-              const float* gr = gp + static_cast<std::size_t>(row0 + row) * d;
+              const float* gr = gp +
+                  static_cast<std::size_t>(row0 + row) * grad_stride;
               bf16* yr = z.y.data() + static_cast<std::size_t>(row) * dp;
               const __m512 g0 = _mm512_loadu_ps(gr + q);
               const __m512 g1 = _mm512_loadu_ps(gr + q + 16);
@@ -4284,7 +4658,8 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
           for (int q = vector_end; q < d; ++q) {
             float sum = 0.0f;
             for (int row = tile0; row < tile1; ++row) {
-              const float* gr = gp + static_cast<std::size_t>(row0 + row) * d;
+              const float* gr = gp +
+                  static_cast<std::size_t>(row0 + row) * grad_stride;
               bf16* yr = z.y.data() + static_cast<std::size_t>(row) * dp;
               if (fused_db) sum += gr[q];
               yr[q] = to_bf16(gr[q] * sp[row0 + row]);
@@ -4306,7 +4681,8 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
           if (fused_scale_transpose) {
             const double fused_t0 = profile_native ? now_ms() : 0.0;
             bv2::scale_bf16_db_transpose_t3(
-                gp, sp, row0 + block, block_end - block, d, dp, rows, block,
+                gp, sp, row0 + block, block_end - block,
+                static_cast<int>(grad_stride), d, dp, rows, block,
                 z.y.data() + static_cast<std::size_t>(block) * dp,
                 z.yt.data(), fused_db ? dbp : nullptr);
             if (profile_native) {
@@ -4337,11 +4713,18 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
       if (profile_native) native_scale_ms[tid] += now_ms() - scale_t0;
 
       double stage_t0 = profile_native ? now_ms() : 0.0;
-      if (compute_dx)
-        bv2::dh_amx_4c2a2b_bf16(
-            z.y.data(), rows, valid, dp, ws.packed_wt.data(), k, kp,
-            reinterpret_cast<bf16*>(d_padded.data_ptr<at::BFloat16>()),
-            row0, true, nullptr);
+      if (compute_dx) {
+        if (return_dp) {
+          bv2::dh_amx_4c2a2b(
+              z.y.data(), rows, valid, dp, ws.packed_wt.data(), k, kp,
+              d_padded.data_ptr<float>(), row0, nullptr, true, nullptr, true);
+        } else {
+          bv2::dh_amx_4c2a2b_bf16(
+              z.y.data(), rows, valid, dp, ws.packed_wt.data(), k, kp,
+              reinterpret_cast<bf16*>(d_padded.data_ptr<at::BFloat16>()),
+              row0, true, nullptr);
+        }
+      }
       if (profile_native) native_dh_ms[tid] += now_ms() - stage_t0;
       if (!fused_transpose) {
         stage_t0 = profile_native ? now_ms() : 0.0;
@@ -4415,11 +4798,17 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
   at::Tensor dx;
   const double profile_pull0 = now_ms();
   if (compute_dx) {
-    at::Tensor pull_input = d_padded.narrow(0, 0, n);
-    pull_input = use_k_tail
-        ? pull_input.narrow(1, 0, k).contiguous() : pull_input;
-    dx = c3_pull_only_bf16_scaled_fp32_amx_v1(
-        pull_input, rowptr, colidx, scale, threads);
+    if (return_dp) {
+      // The caller-owned FP32 accumulator has been updated in place.  Return
+      // only an alias; no per-slab N*K result is allocated or copied.
+      dx = d_padded;
+    } else {
+      at::Tensor pull_input = d_padded.narrow(0, 0, n);
+      pull_input = use_k_tail
+          ? pull_input.narrow(1, 0, k).contiguous() : pull_input;
+      dx = c3_pull_only_bf16_scaled_fp32_amx_v1(
+          pull_input, rowptr, colidx, scale, threads);
+    }
   } else {
     dx = at::empty({0}, grad.options());
   }
@@ -4465,6 +4854,26 @@ std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
   return {dx, dw, db, meta};
 }
 
+std::vector<at::Tensor> c3_backward_aggregate_highd_amx_v1(
+    const at::Tensor& grad_in, const at::Tensor& pulled_in,
+    const at::Tensor& weight_in, const at::Tensor& rowptr_in,
+    const at::Tensor& colidx_in, const at::Tensor& scale_in,
+    int64_t threads64, bool compute_dx) {
+  return c3_backward_aggregate_highd_impl(
+      grad_in, pulled_in, weight_in, rowptr_in, colidx_in, scale_in,
+      at::Tensor(), threads64, compute_dx, false);
+}
+
+std::vector<at::Tensor> c3_backward_aggregate_highd_dp_amx_v1(
+    const at::Tensor& grad_in, const at::Tensor& pulled_in,
+    const at::Tensor& weight_in, const at::Tensor& rowptr_in,
+    const at::Tensor& colidx_in, const at::Tensor& scale_in,
+    const at::Tensor& dp_accum_in, int64_t threads64) {
+  return c3_backward_aggregate_highd_impl(
+      grad_in, pulled_in, weight_in, rowptr_in, colidx_in, scale_in,
+      dp_accum_in, threads64, true, true);
+}
+
 std::vector<at::Tensor> c3_backward_saved_t_amx_v3(
     const at::Tensor& grad_in, const at::Tensor& saved_t_in,
     const at::Tensor& rowptr_in, const at::Tensor& colidx_in,
@@ -4489,7 +4898,7 @@ std::vector<at::Tensor> c3_backward_saved_t_amx_v3(
   const int threads=static_cast<int>(threads64);
   const int dp=round_up(d,32),kp=round_up(k,64),panel=512;
   TORCH_CHECK(saved_t.size(0)==n && scale.numel()==n && rp_t.numel()==n+1 &&
-              k<=128 && d<=128 && threads>=1 && threads<=32,
+              k>=1 && d<=128 && threads>=1 && threads<=32,
               "saved-T backward shape unsupported");
   const float* gp=grad.data_ptr<float>();
   const float* sp=scale.data_ptr<float>();

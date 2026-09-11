@@ -243,8 +243,13 @@ def _sparse_backward_contract(variant: str, k: int, d: int,
     """Return the actual backward CSR operand, logical width and stride."""
     if variant == "aggregate_static_v3":
         return "none", 0, 0
-    if variant in {"native_c3", "native_wide_k", "aggregate_saved_v4"}:
+    if variant in {"native_c3", "native_wide_k"}:
         return "Gs", d, dp
+    if variant == "aggregate_saved_v4":
+        # V4 forms dP=Gs@W^T first and the only backward sparse operation
+        # pulls that K-wide operand.  Reporting Gs/D here made the manifest
+        # disagree with the kernel that was actually timed.
+        return "dP", k, kp
     if variant.startswith("transform_highd_"):
         return "Gs", d, dp
     if variant.startswith("aggregate_highd_"):
@@ -413,7 +418,8 @@ class LayerExecutionPlan:
         if self.order not in {"aggregate", "transform"}:
             raise ValueError(f"invalid order {self.order!r}")
         expected_order = "aggregate" if self.d >= self.k else "transform"
-        if self.order != expected_order:
+        static_order_override = self.execution_variant == "aggregate_static_v3"
+        if self.order != expected_order and not static_order_override:
             raise ValueError("execution plan order violates the shape rule")
         sparse_logical = self.k if self.order == "aggregate" else self.d
         sparse_physical = self.kp if self.order == "aggregate" else self.dp
@@ -660,8 +666,11 @@ def build_layer_plan(
 
     kp = int(math.ceil(k / 64.0) * 64)
     dp = int(math.ceil(d / 32.0) * 32)
-    # V1's order is deliberately dimension based and dataset agnostic.
-    order = "aggregate" if d >= k else "transform"
+    # V1's dynamic order is deliberately dimension based and dataset agnostic.
+    # A static layer may explicitly override it below after proving that SX is
+    # reusable across optimizer steps.
+    shape_order = "aggregate" if d >= k else "transform"
+    order = shape_order
 
     single_mode = _mode("TFS_SMALL_SINGLE_SCAN")
     active_mode = _mode("TFS_ACTIVE_ROW")
@@ -702,13 +711,37 @@ def build_layer_plan(
         aggregate_mode,
         os.environ.get("HYBRID_STATIC_AGG_CACHE", "0") == "1",
     )
-    static_v3_supported = bool(k <= 128 and d <= 128)
+    aggregate_cache_limit_name = "TFS_AGG_CACHE_MAX_BYTES"
+    aggregate_cache_limit_value = os.environ.get(aggregate_cache_limit_name)
+    if aggregate_cache_limit_value is None:
+        aggregate_cache_limit_name = "TFS_HS_CACHE_MAX_BYTES"
+        aggregate_cache_limit_value = os.environ.get(aggregate_cache_limit_name)
+    aggregate_cache_limit = None
+    if aggregate_cache_limit_value is not None:
+        aggregate_cache_limit = _nonnegative_int(
+            aggregate_cache_limit_name, 0)
+    aggregate_cache_bytes = int(n * k * 2)
+    aggregate_cache_fits = bool(
+        aggregate_cache_limit is None or
+        aggregate_cache_bytes <= aggregate_cache_limit)
+    # Wide-K static aggregation is an explicit research path.  Unlike the
+    # dynamic transform-first expression (SXW), SX is independent of W and can
+    # be cached exactly once.  Keep auto compatible with the established rule;
+    # only TFS_STATIC_AGGREGATE=on may override a K>D layer to aggregate-first.
+    wide_static_override = bool(
+        aggregate_mode == "on" and k > 128 and d <= 128)
+    static_v3_supported = bool(d <= 128 and
+                               (k <= 128 or wide_static_override))
     static_pulled = bool(
         static_candidate and static_hs and static_aggregate_requested and
-        static_v3_supported and order == "aggregate" and not compute_dx and
+        static_v3_supported and
+        (shape_order == "aggregate" or wide_static_override) and
+        aggregate_cache_fits and not compute_dx and
         os.environ.get("HYBRID_AMX_FORWARD", "0") == "1" and
         os.environ.get("HYBRID_AMX_BACKWARD", "0") == "1"
     )
+    if static_pulled:
+        order = "aggregate"
 
     # The accepted wide-D aggregate wrapper already returns and saves the
     # pulled BF16 tensor.  Treat it as an aggregate-saved path as well; this
@@ -791,10 +824,9 @@ def build_layer_plan(
         aggregate_single_scan_dP = int(n * kp * 4)
         aggregate_single_scan_workspace = int(
             dslab_workspace + aggregate_single_scan_dP)
-        # This is an explicit reference path, not an independently optimized
-        # native kernel: it accumulates dP across slabs then performs one
-        # final CSR pull.  Preserve it for correctness/data-flow probes, but
-        # never expose it to automatic selection or performance claims.
+        # This remains explicit until the real-graph gate is complete.  Its
+        # native slabs accumulate directly into one budgeted FP32 dP and the
+        # caller performs a sole BF16 rounding plus CSR pull after all slabs.
         aggregate_single_scan_supported = bool(
             order == "aggregate" and compute_dx and
             aggregate_single_scan_workspace <= highd_budget)
@@ -1096,7 +1128,7 @@ def build_layer_plan(
         else "allocator_default"
     )
 
-    reasons = [f"v1_order:{order}"]
+    reasons = [f"v1_order:{shape_order}"]
     if k != kp:
         reasons.append("tail_k_padded")
     if d != dp:
@@ -1105,6 +1137,11 @@ def build_layer_plan(
         reasons.append("static_hs_candidate")
     if static_pulled:
         reasons.append("v3_static_aggregate")
+        if wide_static_override:
+            reasons.append("wide_k_static_order_override")
+    elif (static_candidate and static_hs and static_aggregate_requested and
+          not aggregate_cache_fits):
+        reasons.append("static_aggregate_cache_budget_exceeded")
     elif (static_candidate and static_hs and static_aggregate_requested and
           order == "aggregate" and not compute_dx and
           not static_v3_supported):

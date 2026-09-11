@@ -167,11 +167,13 @@ void transpose_y_block_to_panel_t3(const bf16* y_block, int rows_padded,
 }
 
 void scale_bf16_db_transpose_t3(const float* grad, const float* scale,
-                                int global_row0, int valid_rows, int d,
+                                int global_row0, int valid_rows,
+                                int grad_row_stride, int d,
                                 int d_padded, int panel_stride,
                                 int panel_row_offset, bf16* y_rowmajor,
                                 bf16* y_t_panel, float* db_local) {
-  if (valid_rows < 0 || valid_rows > 32 || d < 1 || d > d_padded ||
+  if (valid_rows < 0 || valid_rows > 32 || grad_row_stride < d ||
+      d < 1 || d > d_padded ||
       (d_padded % 32) != 0 || (panel_stride % 16) != 0 ||
       (panel_row_offset % 16) != 0) {
     throw std::invalid_argument(
@@ -191,7 +193,8 @@ void scale_bf16_db_transpose_t3(const float* grad, const float* scale,
         if (local_row >= valid_rows) {
           std::memset(scratch, 0, sizeof(block[r]));
         } else {
-          const float* gr = grad + static_cast<std::size_t>(global_row) * d;
+          const float* gr = grad +
+              static_cast<std::size_t>(global_row) * grad_row_stride;
           const float sv = scale[global_row];
           const __m512 svv = _mm512_set1_ps(sv);
           const int n0 = std::max(0, std::min(16, d - col));

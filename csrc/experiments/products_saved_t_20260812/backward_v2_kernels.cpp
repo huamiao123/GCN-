@@ -228,6 +228,18 @@ void amx_gemm_4c_epilogue(const bf16* a, int rows_padded,
                           int global_row0, int valid_rows,
                           int logical_output, const float* scale,
                           const float* bias, float* c) {
+  amx_gemm_4c_epilogue_packed(
+      a, rows_padded, reduction_padded, packed_b.data(), output_padded,
+      output_stride, global_row0, valid_rows, logical_output, scale, bias, c);
+}
+
+void amx_gemm_4c_epilogue_packed(const bf16* a, int rows_padded,
+                                 int reduction_padded,
+                                 const bf16* packed_b,
+                                 int output_padded, int output_stride,
+                                 int global_row0, int valid_rows,
+                                 int logical_output, const float* scale,
+                                 const float* bias, float* c) {
   if (rows_padded % 16 != 0 || reduction_padded % 32 != 0 ||
       output_padded % 16 != 0 || valid_rows < 0 || valid_rows > rows_padded ||
       logical_output < 1 || logical_output > output_padded ||
@@ -251,7 +263,7 @@ void amx_gemm_4c_epilogue(const bf16* a, int rows_padded,
         const std::size_t block_base =
             static_cast<std::size_t>(k / 32) * output_blocks + col / 16;
         for (int q = 0; q < active; ++q) {
-          const bf16* b = packed_b.data() + (block_base + q) * 512;
+          const bf16* b = packed_b + (block_base + q) * 512;
           _tile_loadd(6, b, 64);
           switch (q) {
             case 0: _tile_dpbf16ps(0, 4, 6); break;
@@ -296,7 +308,8 @@ void dh_amx_4c2a2b(const bf16* ybar, int rows_padded, int valid_rows,
                    int d_padded, const bf16* packed_wt, int logical_k,
                    int k_padded,
                    float* dh, int global_row0, const float* target_scale,
-                   bool double_buffer, KernelCounters* counters) {
+                   bool double_buffer, KernelCounters* counters,
+                   bool accumulate) {
   const int output_blocks = k_padded / 16;
   alignas(64) float tmp[4][256];
   for (int row = 0; row < rows_padded; row += 16) {
@@ -338,21 +351,26 @@ void dh_amx_4c2a2b(const bf16* ybar, int rows_padded, int valid_rows,
           }
         }
       }
-      if (target_scale == nullptr) {
+      if (target_scale == nullptr && !accumulate) {
         store_c_tiles(dh + static_cast<std::size_t>(global_row0 + row) *
                                k_padded + col,
                       k_padded, active);
       } else {
         store_c_to_scratch(tmp, active);
         for (int i = 0; i < 16 && row + i < valid_rows; ++i) {
-          const __m512 scale =
-              _mm512_set1_ps(target_scale[global_row0 + row + i]);
+          const __m512 scale = target_scale == nullptr
+              ? _mm512_set1_ps(1.0f)
+              : _mm512_set1_ps(target_scale[global_row0 + row + i]);
           for (int q = 0; q < active; ++q) {
-            const __m512 value = _mm512_load_ps(tmp[q] + i * 16);
-            _mm512_storeu_ps(
+            __m512 value = _mm512_mul_ps(
+                _mm512_load_ps(tmp[q] + i * 16), scale);
+            float* destination =
                 dh + static_cast<std::size_t>(global_row0 + row + i) *
-                         k_padded + col + q * 16,
-                _mm512_mul_ps(value, scale));
+                         k_padded + col + q * 16;
+            if (accumulate)
+              value = _mm512_add_ps(value, _mm512_loadu_ps(destination));
+            _mm512_storeu_ps(
+                destination, value);
           }
         }
       }

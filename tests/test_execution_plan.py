@@ -42,6 +42,8 @@ _FORMAL_SWITCHES = (
     "TFS_HIGHD_NATIVE_PANEL",
     "TFS_HIGHD_PANEL_BUDGET_BYTES",
     "TFS_WORKSPACE_CACHE_MAX_BYTES",
+    "TFS_AGG_CACHE_MAX_BYTES",
+    "TFS_HS_CACHE_MAX_BYTES",
     "TFS_HIGHD_FUSED_DB",
     "TFS_HIGHD_FUSED_TRANSPOSE",
     "TFS_HIGHD_FUSED_SCALE_TRANSPOSE",
@@ -240,6 +242,53 @@ def test_static_v3_capability_is_checked_by_planner(monkeypatch):
     assert "static_v3_capability_k_or_d_exceeded" in plan.reason
 
 
+def test_wide_k_static_cache_is_an_explicit_order_override(monkeypatch):
+    for name, value in {
+            "TFS_STATIC_HS": "on", "TFS_STATIC_AGGREGATE": "on",
+            "HYBRID_STATIC_AGG_CACHE": "1", "HYBRID_AMX_FORWARD": "1",
+            "HYBRID_AMX_BACKWARD": "1"}.items():
+        monkeypatch.setenv(name, value)
+    plan = build_layer_plan(
+        4097, 602, 128, compute_dx=False, input_static=True,
+        graph_static=True, feature_static=True)
+    assert plan.execution_variant == "aggregate_static_v3"
+    assert plan.order == "aggregate"
+    assert plan.sparse_fwd_tensor == "Hs"
+    assert plan.sparse_fwd_width_logical == 602
+    assert "v1_order:transform" in plan.reason
+    assert "wide_k_static_order_override" in plan.reason
+    plan.validate()
+
+
+def test_wide_k_static_cache_auto_keeps_dynamic_shape_rule(monkeypatch):
+    for name, value in {
+            "TFS_STATIC_HS": "on", "TFS_STATIC_AGGREGATE": "auto",
+            "HYBRID_STATIC_AGG_CACHE": "1", "HYBRID_AMX_FORWARD": "1",
+            "HYBRID_AMX_BACKWARD": "1"}.items():
+        monkeypatch.setenv(name, value)
+    plan = build_layer_plan(
+        4097, 602, 128, compute_dx=False, input_static=True,
+        graph_static=True, feature_static=True)
+    assert plan.execution_variant == "native_wide_k"
+    assert plan.order == "transform"
+
+
+def test_wide_k_static_cache_budget_falls_back_before_dispatch(monkeypatch):
+    for name, value in {
+            "TFS_STATIC_HS": "on", "TFS_STATIC_AGGREGATE": "on",
+            "HYBRID_STATIC_AGG_CACHE": "1", "HYBRID_AMX_FORWARD": "1",
+            "HYBRID_AMX_BACKWARD": "1",
+            "TFS_AGG_CACHE_MAX_BYTES": "1024"}.items():
+        monkeypatch.setenv(name, value)
+    plan = build_layer_plan(
+        4097, 602, 128, compute_dx=False, input_static=True,
+        graph_static=True, feature_static=True)
+    assert plan.execution_variant == "native_wide_k"
+    assert plan.order == "transform"
+    assert "static_aggregate_cache_budget_exceeded" in plan.reason
+    plan.validate()
+
+
 def test_wide_aggregate_saves_pulled_contract():
     plan = build_layer_plan(1000, 128, 2983, compute_dx=True)
     assert plan.order == "aggregate"
@@ -324,7 +373,8 @@ def test_sparse_backward_contract_is_variant_driven(monkeypatch):
     v4 = build_layer_plan(4097, 100, 110, compute_dx=True)
     assert v4.execution_variant == "aggregate_saved_v4"
     assert (v4.sparse_bwd_tensor, v4.sparse_bwd_width_logical,
-            v4.sparse_bwd_width_physical) == ("Gs", 110, v4.dp)
+            v4.sparse_bwd_width_physical) == ("dP", 100, v4.kp)
+    assert "sparse_bwd_tensor=dP" in v4.log_line()
 
     monkeypatch.setenv("TFS_AGGREGATE_SAVED", "auto")
     monkeypatch.setenv("TFS_STATIC_HS", "on")

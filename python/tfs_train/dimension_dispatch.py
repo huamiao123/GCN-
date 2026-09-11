@@ -205,10 +205,9 @@ class AggregateWideAMX(torch.autograd.Function):
                 d_slabs=layer_plan.d_slabs)
         elif variant == "aggregate_highd_single_scan":
             _assert_actual_variant(layer_plan, "aggregate_highd_single_scan")
-            dx, dw = streamed_aggregate_single_scan_backward(
+            dx, dw, db = streamed_aggregate_single_scan_backward(
                 pulled, weight, grad, scale_f, rowptr, colidx,
                 ctx.threads, compute_dx, plan=highd_plan)
-            db = grad.sum(0)
         elif variant == "aggregate_highd_reference":
             _assert_actual_variant(layer_plan, "aggregate_highd_reference")
             dx, dw, _resolved = streamed_aggregate_backward(
